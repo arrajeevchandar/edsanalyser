@@ -39,6 +39,7 @@ describe('App', () => {
   it('starts a scan from the URL form', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ isEDS: true, url: 'https://example.com/' }))
       .mockResolvedValueOnce(jsonResponse({
         id: 'scan-1',
         inputUrl: 'https://example.com',
@@ -58,6 +59,20 @@ describe('App', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/scans', expect.objectContaining({ method: 'POST' })));
     expect(await screen.findByText('example.com')).toBeInTheDocument();
+  });
+
+  it('shows the "enter an EDS site" modal when the site is not EDS', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ isEDS: false, url: 'https://not-eds.com/' }));
+
+    render(<App />);
+    await userEvent.type(screen.getByLabelText('EDS URL'), 'https://not-eds.com');
+    await userEvent.click(screen.getByTitle('Start scan'));
+
+    expect(await screen.findByText('Enter an EDS site')).toBeInTheDocument();
+    // The scan must not start when the site is not EDS.
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/scans', expect.objectContaining({ method: 'POST' }));
   });
 
   it('runs Lighthouse for all pages from the overview button', async () => {

@@ -23,6 +23,7 @@ func NewServer(service *scanner.Service, staticDir string) http.Handler {
 	server := &Server{service: service, staticDir: staticDir}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", server.health)
+	mux.HandleFunc("/api/eds-check", server.edsCheck)
 	mux.HandleFunc("/api/scans", server.scans)
 	mux.HandleFunc("/api/scans/", server.scanByID)
 	mux.HandleFunc("/", server.static)
@@ -31,6 +32,26 @@ func NewServer(service *scanner.Service, staticDir string) http.Handler {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) edsCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	isEDS, rootURL, err := s.service.CheckEDS(r.Context(), body.URL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"isEDS": isEDS, "url": rootURL})
 }
 
 func (s *Server) scans(w http.ResponseWriter, r *http.Request) {

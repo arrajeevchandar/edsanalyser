@@ -106,6 +106,51 @@ func (s *Service) StartScan(parent context.Context, inputURL string, opts ScanOp
 	return scan, parent.Err()
 }
 
+// CheckEDS reports whether the given site looks like an Adobe Edge Delivery
+// Services (EDS) project by probing for /scripts/aem.js at the site origin,
+// which every EDS site ships. It returns the normalized root URL alongside the
+// result so the caller can surface what was actually checked.
+func (s *Service) CheckEDS(ctx context.Context, inputURL string) (bool, string, error) {
+	root, err := NormalizeInputURL(inputURL)
+	if err != nil {
+		return false, "", err
+	}
+	probe := root.Scheme + "://" + root.Host + "/scripts/aem.js"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probe, nil)
+	if err != nil {
+		return false, root.String(), err
+	}
+	req.Header.Set("User-Agent", "EDSAnalyser/0.1 (+https://localhost)")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return false, root.String(), err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+	isEDS := isEDSScriptResponse(resp.StatusCode, resp.Header.Get("Content-Type"), body)
+	return isEDS, root.String(), nil
+}
+
+// isEDSScriptResponse decides whether a /scripts/aem.js probe response is a real
+// EDS script rather than a catch-all fallback. SPA hosts like Netlify answer
+// every path with a 200 and the site's index.html, so the status code alone is
+// not enough: the response must actually be JavaScript and must not be an HTML
+// page.
+func isEDSScriptResponse(status int, contentType string, body []byte) bool {
+	if status < 200 || status >= 300 {
+		return false
+	}
+	ct := strings.ToLower(contentType)
+	if strings.Contains(ct, "html") {
+		return false
+	}
+	snippet := strings.ToLower(strings.TrimSpace(string(body)))
+	if strings.HasPrefix(snippet, "<!doctype") || strings.HasPrefix(snippet, "<html") || strings.Contains(snippet, "<head") {
+		return false
+	}
+	return strings.Contains(ct, "javascript") || strings.Contains(ct, "ecmascript")
+}
+
 func (s *Service) ListScans() ([]ScanSummary, error) {
 	return s.store.ListScans()
 }

@@ -14,8 +14,10 @@ import {
   Search,
   ShieldCheck,
   StopCircle,
+  TriangleAlert,
+  X,
 } from 'lucide-react';
-import { cancelScan, getScan, listScans, reauditScan, startScan } from './api';
+import { cancelScan, checkEds, getScan, listScans, reauditScan, startScan } from './api';
 import type { BlockStat, PageResult, ScanEvent, ScanResult, ScanSummary, SectionStat } from './types';
 
 type Tab = 'overview' | 'pages' | 'blocks' | 'links' | 'seo' | 'history';
@@ -40,6 +42,7 @@ export default function App() {
   const [events, setEvents] = useState<ScanEvent[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [notEdsOpen, setNotEdsOpen] = useState(false);
 
   useEffect(() => {
     void refreshHistory();
@@ -131,6 +134,11 @@ export default function App() {
     setEvents([]);
     setLoading(true);
     try {
+      const { isEDS } = await checkEds(url);
+      if (!isEDS) {
+        setNotEdsOpen(true);
+        return;
+      }
       const created = await startScan(url, null);
       setActiveScan(created);
       setScan({ summary: created, pages: [], blocks: [], sections: [], links: emptyLinks, seo: emptySEO, generatedAt: new Date().toISOString() });
@@ -275,6 +283,31 @@ export default function App() {
         {scan && tab === 'seo' && <SEOView scan={scan} />}
         {tab === 'history' && <HistoryView history={history} currentID={summary?.id} onOpen={(id) => void loadScan(id)} />}
       </main>
+
+      {notEdsOpen && <NotEdsModal onClose={() => setNotEdsOpen(false)} />}
+    </div>
+  );
+}
+
+function NotEdsModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="modal-overlay" role="presentation" onClick={onClose}>
+      <div className="modal-card" role="dialog" aria-modal="true" aria-labelledby="not-eds-title" onClick={(event) => event.stopPropagation()}>
+        <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
+          <X size={18} />
+        </button>
+        <div className="modal-icon">
+          <TriangleAlert size={26} />
+        </div>
+        <h2 id="not-eds-title">Enter an EDS site</h2>
+        <p>
+          This doesn&apos;t look like an Edge Delivery Services site &mdash; we couldn&apos;t find
+          <code>/scripts/aem.js</code> at that origin. Please enter a valid EDS site URL.
+        </p>
+        <button type="button" className="ghost action-row modal-action" onClick={onClose}>
+          Got it
+        </button>
+      </div>
     </div>
   );
 }

@@ -16,6 +16,13 @@ export function listScans(): Promise<ScanSummary[]> {
   return request<ScanSummary[] | null>('/api/scans').then((scans) => scans || []);
 }
 
+export function checkEds(url: string): Promise<{ isEDS: boolean; url: string }> {
+  return request<{ isEDS: boolean; url: string }>('/api/eds-check', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  });
+}
+
 export function startScan(url: string, auditLimit: number | null): Promise<ScanSummary> {
   return request<ScanSummary>('/api/scans', {
     method: 'POST',

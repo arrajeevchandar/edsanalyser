@@ -592,3 +592,70 @@ type failingLighthouse struct{}
 func (failingLighthouse) Audit(context.Context, string) (ScoreSet, error) {
 	return ScoreSet{}, errors.New("lighthouse failed")
 }
+
+func TestIsEDSScriptResponse(t *testing.T) {
+	htmlDoc := []byte("<!DOCTYPE html><html><head></head><body></body></html>")
+	jsBody := []byte("export default function decorate(){}\n")
+	cases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        []byte
+		want        bool
+	}{
+		{"real eds script", 200, "text/javascript; charset=utf-8", jsBody, true},
+		{"application javascript", 200, "application/javascript", jsBody, true},
+		{"netlify html fallback by content-type", 200, "text/html; charset=utf-8", htmlDoc, false},
+		{"html fallback served as js content-type", 200, "text/javascript", htmlDoc, false},
+		{"not found", 404, "text/javascript", jsBody, false},
+		{"unknown content type", 200, "application/octet-stream", jsBody, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isEDSScriptResponse(tc.status, tc.contentType, tc.body); got != tc.want {
+				t.Fatalf("isEDSScriptResponse(%d, %q) = %v, want %v", tc.status, tc.contentType, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckEDS(t *testing.T) {
+	t.Run("eds site", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/scripts/aem.js" {
+				w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+				_, _ = w.Write([]byte("export default function(){}"))
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer server.Close()
+
+		svc := NewService(nil, ServiceOptions{})
+		isEDS, _, err := svc.CheckEDS(context.Background(), server.URL)
+		if err != nil {
+			t.Fatalf("CheckEDS error: %v", err)
+		}
+		if !isEDS {
+			t.Fatal("expected EDS site to be detected")
+		}
+	})
+
+	t.Run("spa fallback is not eds", func(t *testing.T) {
+		// Emulates a Netlify-style host that serves index.html for every path.
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte("<!DOCTYPE html><html><head></head><body>app</body></html>"))
+		}))
+		defer server.Close()
+
+		svc := NewService(nil, ServiceOptions{})
+		isEDS, _, err := svc.CheckEDS(context.Background(), server.URL)
+		if err != nil {
+			t.Fatalf("CheckEDS error: %v", err)
+		}
+		if isEDS {
+			t.Fatal("expected SPA fallback to be rejected as non-EDS")
+		}
+	})
+}
