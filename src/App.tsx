@@ -15,7 +15,7 @@ import {
   ShieldCheck,
   StopCircle,
 } from 'lucide-react';
-import { cancelScan, getScan, listScans, startScan } from './api';
+import { cancelScan, getScan, listScans, reauditScan, startScan } from './api';
 import type { BlockStat, PageResult, ScanEvent, ScanResult, ScanSummary, SectionStat } from './types';
 
 type Tab = 'overview' | 'pages' | 'blocks' | 'links' | 'seo' | 'history';
@@ -151,6 +151,22 @@ export default function App() {
     await cancelScan(activeScan.id).catch((err) => setError(err instanceof Error ? err.message : 'Unable to cancel scan'));
   }
 
+  async function onAuditAll() {
+    if (!scan) {
+      return;
+    }
+    setError('');
+    setEvents([]);
+    try {
+      const updated = await reauditScan(scan.summary.id, 'all');
+      const running = { ...updated, status: 'running', phase: 'auditing' };
+      setActiveScan(running);
+      setScan((current) => (current ? { ...current, summary: running } : current));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to start Lighthouse run');
+    }
+  }
+
   const summary = scan?.summary || activeScan;
   const isRunning = summary?.status === 'running';
 
@@ -244,7 +260,7 @@ export default function App() {
 
         {!scan && <EmptyState history={history} onOpen={(id) => void loadScan(id)} />}
 
-        {scan && tab === 'overview' && <Overview scan={scan} />}
+        {scan && tab === 'overview' && <Overview scan={scan} onAuditAll={() => void onAuditAll()} auditBusy={isRunning} />}
         {scan && tab === 'pages' && (
           <PagesView
             pages={filteredPages}
@@ -263,7 +279,7 @@ export default function App() {
   );
 }
 
-function Overview({ scan }: { scan: ScanResult }) {
+function Overview({ scan, onAuditAll, auditBusy }: { scan: ScanResult; onAuditAll: () => void; auditBusy: boolean }) {
   const totals = [
     { label: 'Pages analyzed', value: scan.summary.fastCompletedPages || scan.pages.length },
     { label: 'Blocks used', value: scan.pages.reduce((sum, page) => sum + page.blockCount, 0) },
@@ -291,6 +307,16 @@ function Overview({ scan }: { scan: ScanResult }) {
           <BarChart3 size={19} />
         </div>
         <p className="panel-note">{lighthouseLabel(scan.summary)}</p>
+        <button
+          type="button"
+          className="ghost action-row"
+          onClick={onAuditAll}
+          disabled={auditBusy || scan.pages.length === 0}
+          title="Run Lighthouse on every page in this scan"
+        >
+          {auditBusy ? <Loader2 className="spin" size={16} /> : <BarChart3 size={16} />}
+          Run Lighthouse for all pages
+        </button>
         <div className="score-grid">
           <ScoreGauge label="Performance" score={scan.summary.scores.performance} />
           <ScoreGauge label="Accessibility" score={scan.summary.scores.accessibility} />
@@ -619,7 +645,7 @@ function phaseLabel(summary: ScanSummary) {
     case 'fast-complete':
       return 'Fast report ready';
     case 'auditing':
-      return 'Auditing top 5';
+      return summary.auditQueuedPages > 0 ? `Auditing ${summary.auditQueuedPages} pages` : 'Auditing';
     case 'completed':
       return 'Complete';
     case 'cancelled':
@@ -634,10 +660,10 @@ function lighthouseLabel(summary: ScanSummary) {
     return 'Lighthouse starts after the fast report is ready.';
   }
   if (summary.phase === 'auditing') {
-    return `Auditing ${summary.auditCompletedPages}/${summary.auditQueuedPages} top pages.`;
+    return `Auditing ${summary.auditCompletedPages}/${summary.auditQueuedPages} pages.`;
   }
   if (summary.auditQueuedPages > 0) {
-    return `Audited ${summary.auditCompletedPages}/${summary.auditQueuedPages} top pages.`;
+    return `Audited ${summary.auditCompletedPages}/${summary.auditQueuedPages} pages.`;
   }
   return 'No Lighthouse audits queued.';
 }

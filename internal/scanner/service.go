@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -125,6 +126,67 @@ func (s *Service) CancelScan(id string) error {
 	return nil
 }
 
+// ReauditScan re-runs Lighthouse on an existing scan without re-crawling. With
+// the default options (LighthouseMode "all") it audits every fetched page, which
+// backs the "Run Lighthouse for all pages" action in the dashboard.
+func (s *Service) ReauditScan(id string, opts ScanOptions) (ScanSummary, error) {
+	result, err := s.store.GetScan(id)
+	if err != nil {
+		return ScanSummary{}, err
+	}
+	if opts.LighthouseMode == "" {
+		opts.LighthouseMode = "all"
+	}
+
+	s.mu.Lock()
+	if _, running := s.cancels[id]; running {
+		s.mu.Unlock()
+		return ScanSummary{}, errors.New("scan is already running")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancels[id] = cancel
+	s.mu.Unlock()
+
+	scan := result.Summary
+	scan.Status = "running"
+	scan.Phase = "auditing"
+	scan.AuditQueuedPages = 0
+	scan.AuditCompletedPages = 0
+	scan.AuditFailedPages = 0
+	scan.Scores = ScoreSet{}
+	scan.Error = ""
+	scan.FinishedAt = time.Time{}
+	_ = s.store.UpdateScan(scan)
+
+	go s.runReaudit(ctx, scan, result.Pages, opts)
+	return scan, nil
+}
+
+func (s *Service) runReaudit(ctx context.Context, scan ScanSummary, pages []PageResult, opts ScanOptions) {
+	defer func() {
+		s.mu.Lock()
+		delete(s.cancels, scan.ID)
+		s.mu.Unlock()
+	}()
+
+	s.publish(Event{Type: "start", ScanID: scan.ID, Message: "Re-running Lighthouse"})
+	scan = s.runLighthouseAudits(ctx, scan, pages, opts)
+	if ctx.Err() != nil {
+		scan.Status = "cancelled"
+		scan.Phase = "cancelled"
+		scan.FinishedAt = time.Now()
+		scan.Error = "scan cancelled"
+		_ = s.store.UpdateScan(scan)
+		s.publish(Event{Type: "complete", ScanID: scan.ID, Message: "Audit cancelled", Data: scan})
+		return
+	}
+	scan.Status = "completed"
+	scan.Phase = "completed"
+	scan.FinishedAt = time.Now()
+	_ = s.store.UpdateScan(scan)
+	s.publish(Event{Type: "complete", ScanID: scan.ID, Message: "Lighthouse complete", Data: scan})
+}
+
 func (s *Service) Subscribe(scanID string) (<-chan Event, func()) {
 	ch := make(chan Event, 32)
 	s.mu.Lock()
@@ -164,17 +226,19 @@ func (s *Service) runScan(ctx context.Context, scan ScanSummary, root *url.URL, 
 	}
 
 	seen := map[string]bool{}
+	analyzedURLs := map[string]bool{}
+	skipped := 0
 	var queue []string
 	limit := 0
 	if opts.CrawlLimit != nil {
 		limit = *opts.CrawlLimit
 	}
 	enqueue := func(raw string) {
-		if limit > 0 && len(seen) >= limit {
+		if limit > 0 && len(seen)-skipped >= limit {
 			return
 		}
 		normalized, ok := normalizePageURL(raw, root)
-		if !ok || seen[normalized] {
+		if !ok || seen[normalized] || analyzedURLs[normalized] {
 			return
 		}
 		parsed, err := url.Parse(normalized)
@@ -183,7 +247,7 @@ func (s *Service) runScan(ctx context.Context, scan ScanSummary, root *url.URL, 
 		}
 		seen[normalized] = true
 		queue = append(queue, normalized)
-		scan.DiscoveredPages = len(seen)
+		scan.DiscoveredPages = len(seen) - skipped
 		_ = s.store.UpdateScan(scan)
 	}
 	for _, seed := range seeds {
@@ -231,6 +295,26 @@ func (s *Service) runScan(ctx context.Context, scan ScanSummary, root *url.URL, 
 			s.publish(Event{Type: "page-start", ScanID: scan.ID, PageURL: next})
 		case page := <-results:
 			inFlight--
+			// Identity collapses pages that are really the same: redirect targets
+			// (handled at fetch time) and query-string variants that share a
+			// canonical URL (e.g. /mens and /mens?category=running).
+			identity := pageIdentity(page, root)
+			if identity != "" && analyzedURLs[identity] {
+				skipped++
+				scan.DiscoveredPages = len(seen) - skipped
+				_ = s.store.UpdateScan(scan)
+				s.publish(Event{Type: "page-skipped", ScanID: scan.ID, PageURL: page.URL, Message: "duplicate of an already-analyzed page"})
+				continue
+			}
+			if identity != "" {
+				analyzedURLs[identity] = true
+				if page.URL != identity {
+					page.URL = identity
+					for i := range page.Links {
+						page.Links[i].PageURL = identity
+					}
+				}
+			}
 			scan.CompletedPages++
 			scan.FastCompletedPages = scan.CompletedPages
 			if page.FetchError != "" {
@@ -286,7 +370,7 @@ func (s *Service) cancelScan(scan ScanSummary, jobs chan string) {
 }
 
 func (s *Service) runLighthouseAudits(ctx context.Context, scan ScanSummary, pages []PageResult, opts ScanOptions) ScanSummary {
-	auditPages := selectAuditPages(pages, opts)
+	auditPages := selectAuditPages(pages, opts, scan.RootURL)
 	scan.AuditQueuedPages = len(auditPages)
 	if scan.AuditQueuedPages == 0 {
 		return scan
@@ -323,25 +407,114 @@ func (s *Service) runLighthouseAudits(ctx context.Context, scan ScanSummary, pag
 	return scan
 }
 
-func selectAuditPages(pages []PageResult, opts ScanOptions) []PageResult {
+func selectAuditPages(pages []PageResult, opts ScanOptions, rootURL string) []PageResult {
 	if opts.LighthouseMode == "none" {
 		return []PageResult{}
 	}
+
+	// Only pages that actually fetched can be audited by Lighthouse.
+	candidates := make([]PageResult, 0, len(pages))
+	for _, page := range pages {
+		if page.FetchError == "" {
+			candidates = append(candidates, page)
+		}
+	}
+
+	// "all" mode audits every fetched page.
+	if opts.LighthouseMode == "all" {
+		return candidates
+	}
+
 	limit := opts.LighthouseLimit
 	if limit <= 0 {
 		limit = 5
 	}
-	selected := make([]PageResult, 0, limit)
-	for _, page := range pages {
-		if page.FetchError != "" {
+	if len(candidates) <= limit {
+		return candidates
+	}
+
+	// "top" mode: always keep the home page, then fill the remaining slots with
+	// the most content-heavy pages. The home page is pulled out before sorting —
+	// pinning it inside the comparator would be unsafe because the comparator
+	// sees shifting positions, not original indices.
+	homeIndex := homePageIndex(candidates, rootURL)
+	var home *PageResult
+	rest := make([]PageResult, 0, len(candidates))
+	for i := range candidates {
+		if i == homeIndex {
+			page := candidates[i]
+			home = &page
 			continue
 		}
-		selected = append(selected, page)
-		if opts.LighthouseMode == "top" && len(selected) >= limit {
+		rest = append(rest, candidates[i])
+	}
+
+	sort.SliceStable(rest, func(i, j int) bool {
+		wi, wj := contentWeight(rest[i]), contentWeight(rest[j])
+		if wi != wj {
+			return wi > wj
+		}
+		return rest[i].URL < rest[j].URL
+	})
+
+	selected := make([]PageResult, 0, limit)
+	if home != nil {
+		selected = append(selected, *home)
+	}
+	for _, page := range rest {
+		if len(selected) >= limit {
 			break
 		}
+		selected = append(selected, page)
 	}
 	return selected
+}
+
+// contentWeight scores how content-heavy a page is. EDS blocks are the unit of
+// real content, so they dominate; sections act as a fine tie-breaker. Links are
+// deliberately excluded — utility pages like nav, footer and fragment shells are
+// link-heavy but carry no content, and should not outrank actual pages.
+func contentWeight(page PageResult) int {
+	return page.BlockCount*100 + page.SectionCount
+}
+
+// homePageIndex finds the home page among candidates: an exact match against the
+// crawl root if present, otherwise the page with the shallowest path. Returns -1
+// when there are no candidates.
+func homePageIndex(pages []PageResult, rootURL string) int {
+	target := canonicalPathKey(rootURL)
+	best := -1
+	bestDepth := -1
+	for i, page := range pages {
+		if canonicalPathKey(page.URL) == target {
+			return i
+		}
+		depth := strings.Count(strings.Trim(pagePath(page.URL), "/"), "/")
+		if best == -1 || depth < bestDepth {
+			best = i
+			bestDepth = depth
+		}
+	}
+	return best
+}
+
+// canonicalPathKey normalizes a URL for home-page comparison by lowercasing the
+// host and dropping a trailing slash from the path.
+func canonicalPathKey(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return strings.ToLower(strings.TrimRight(raw, "/"))
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	return strings.ToLower(parsed.Host) + path
+}
+
+func pagePath(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	return parsed.Path
 }
 
 func (s *Service) fetchAndAnalyzePage(ctx context.Context, pageURL string, root *url.URL) PageResult {
@@ -364,17 +537,73 @@ func (s *Service) fetchAndAnalyzePage(ctx context.Context, pageURL string, root 
 		return page
 	}
 
-	analyzed, err := AnalyzeHTML(pageURL, io.LimitReader(resp.Body, 16*1024*1024), root)
+	// The HTTP client follows redirects, so resp.Request.URL is the URL that
+	// actually served this content. Key the page on that final, same-origin URL
+	// so several source URLs that redirect to the same page collapse into one.
+	canonicalURL := finalPageURL(pageURL, resp, root)
+	analyzed, err := AnalyzeHTML(canonicalURL, io.LimitReader(resp.Body, 16*1024*1024), root)
 	if err != nil {
 		page.FetchError = err.Error()
 		return page
 	}
 	analyzed.StatusCode = resp.StatusCode
 	for i := range analyzed.Links {
-		analyzed.Links[i].PageURL = pageURL
+		analyzed.Links[i].PageURL = canonicalURL
 	}
 	analyzed.AuditStatus = "pending"
 	return NormalizePage(analyzed)
+}
+
+// finalPageURL returns the URL that ultimately served the response after any
+// redirects, normalized and constrained to the crawl origin. If the response
+// ended up on a different origin (or cannot be normalized) the originally
+// requested URL is kept so off-site redirects do not pollute the page list.
+func finalPageURL(requested string, resp *http.Response, root *url.URL) string {
+	if resp == nil || resp.Request == nil || resp.Request.URL == nil {
+		return requested
+	}
+	normalized, ok := normalizePageURL(resp.Request.URL.String(), root)
+	if !ok {
+		return requested
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil || !sameOrigin(parsed, root) {
+		return requested
+	}
+	return normalized
+}
+
+// pageIdentity returns the URL that should represent a page for deduplication.
+// When a page declares a same-origin canonical URL that shares its path, the
+// canonical is used so query-string variants (e.g. /mens?category=running)
+// collapse onto the real page (/mens). The same-path guard is deliberate: it
+// only merges query variants and never different paths, so a site that
+// misconfigures every page's canonical to a single URL is not collapsed into
+// one entry. Pages with no usable canonical keep their own URL.
+func pageIdentity(page PageResult, root *url.URL) string {
+	if strings.TrimSpace(page.Canonical) == "" {
+		return page.URL
+	}
+	base, err := url.Parse(page.URL)
+	if err != nil {
+		base = root
+	}
+	canonical, ok := normalizePageURL(page.Canonical, base)
+	if !ok {
+		return page.URL
+	}
+	canonicalURL, err := url.Parse(canonical)
+	if err != nil || !sameOrigin(canonicalURL, root) {
+		return page.URL
+	}
+	pageURL, err := url.Parse(page.URL)
+	if err != nil {
+		return page.URL
+	}
+	if strings.TrimRight(canonicalURL.Path, "/") == strings.TrimRight(pageURL.Path, "/") {
+		return canonical
+	}
+	return page.URL
 }
 
 func (s *Service) auditPageWithLighthouse(ctx context.Context, page PageResult) PageResult {
