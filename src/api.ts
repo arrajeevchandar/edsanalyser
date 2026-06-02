@@ -31,6 +31,13 @@ export function cancelScan(id: string): Promise<{ status: string }> {
   return request<{ status: string }>(`/api/scans/${id}/cancel`, { method: 'POST' });
 }
 
+export function reauditScan(id: string, mode: 'all' | 'top' = 'all'): Promise<ScanSummary> {
+  return request<ScanSummary>(`/api/scans/${id}/audit`, {
+    method: 'POST',
+    body: JSON.stringify({ mode }),
+  }).then(normalizeSummary);
+}
+
 function normalizeScanResult(result: ScanResult): ScanResult {
   const pages = (result.pages || []).map(normalizePage);
   return {

@@ -60,6 +60,54 @@ describe('App', () => {
     expect(await screen.findByText('example.com')).toBeInTheDocument();
   });
 
+  it('runs Lighthouse for all pages from the overview button', async () => {
+    const summary = scanSummary('scan-audit');
+    const result = {
+      summary,
+      pages: [{
+        url: 'https://example.com/',
+        statusCode: 200,
+        title: 'Home',
+        h1: 'Home',
+        canonical: '',
+        description: '',
+        robots: '',
+        lang: '',
+        og: { title: 'Home', description: '', image: '', url: '', type: '', siteName: '' },
+        links: [],
+        blocks: [],
+        sections: [],
+        blockCount: 0,
+        sectionCount: 0,
+        linkCount: 0,
+        internalLinks: 0,
+        externalLinks: 0,
+        lighthouse: { performance: null, accessibility: null, bestPractices: null, seo: null, health: null },
+        auditStatus: 'pending',
+      }],
+      blocks: [],
+      sections: [],
+      links: null,
+      seo: null,
+      generatedAt: new Date().toISOString(),
+    };
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse([summary]))   // listScans
+      .mockResolvedValueOnce(jsonResponse(result))       // getScan
+      .mockResolvedValueOnce(jsonResponse({ ...summary, status: 'running', phase: 'auditing' })); // reauditScan
+
+    render(<App />);
+    await userEvent.click(await screen.findByText('example.com'));
+    await userEvent.click(await screen.findByRole('button', { name: /Run Lighthouse for all pages/i }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/scans/scan-audit/audit',
+        expect.objectContaining({ method: 'POST', body: JSON.stringify({ mode: 'all' }) }),
+      ),
+    );
+  });
+
   it('renders old scan data with null nested arrays without blanking tabs', async () => {
     const summary = scanSummary('scan-null');
     fetchMock

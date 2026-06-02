@@ -109,6 +109,33 @@ func (s *Server) scanByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "audit" && r.Method == http.MethodPost {
+		var body struct {
+			Mode  string `json:"mode"`
+			Limit *int   `json:"limit"`
+		}
+		// Body is optional; default to auditing every page.
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		opts := scanner.ScanOptions{LighthouseMode: "all"}
+		if body.Mode != "" {
+			opts.LighthouseMode = body.Mode
+		}
+		if body.Limit != nil {
+			opts.LighthouseLimit = *body.Limit
+		}
+		scan, err := s.service.ReauditScan(id, opts)
+		if err != nil {
+			status := http.StatusConflict
+			if errors.Is(err, sql.ErrNoRows) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, scan)
+		return
+	}
+
 	w.WriteHeader(http.StatusNotFound)
 }
 
