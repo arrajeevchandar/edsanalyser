@@ -64,6 +64,15 @@ func (r CLILighthouseRunner) Audit(ctx context.Context, pageURL string) (ScoreSe
 		if ctx.Err() != nil {
 			return ScoreSet{}, ctx.Err()
 		}
+		// Lighthouse writes the full JSON report to stdout before chrome-launcher
+		// tears down its temporary Chrome profile. On Windows that cleanup can
+		// fail with EPERM (the Chrome subprocess has not released its file
+		// handles yet), making the CLI exit non-zero even though the audit
+		// itself succeeded. Recover the report in that case instead of throwing
+		// away a complete set of scores over a cosmetic cleanup error.
+		if scores, parseErr := ParseLighthouseScores(stdout.Bytes()); parseErr == nil && scores.HasAnyScore() {
+			return scores, nil
+		}
 		return ScoreSet{}, fmt.Errorf("lighthouse failed: %w: %s", err, stderr.String())
 	}
 	return ParseLighthouseScores(stdout.Bytes())

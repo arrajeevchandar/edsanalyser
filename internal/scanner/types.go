@@ -10,6 +10,14 @@ type ScoreSet struct {
 	Health        *float64 `json:"health"`
 }
 
+// HasAnyScore reports whether at least one Lighthouse category produced a
+// score. It is used to tell a usable (if partial) report apart from an empty
+// one when Lighthouse exits non-zero.
+func (s ScoreSet) HasAnyScore() bool {
+	return s.Performance != nil || s.Accessibility != nil ||
+		s.BestPractices != nil || s.SEO != nil || s.Health != nil
+}
+
 type ScanSummary struct {
 	ID                  string    `json:"id"`
 	InputURL            string    `json:"inputUrl"`
