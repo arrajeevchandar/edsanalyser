@@ -179,67 +179,79 @@ export default function App() {
   const isRunning = summary?.status === 'running';
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className="app">
+      <header className="appbar">
         <div className="brand">
-          <div className="brand-mark">
-            <Globe2 size={22} />
-          </div>
-          <div>
+          <span className="brand-mark">
+            <Globe2 size={20} strokeWidth={2.4} />
+          </span>
+          <span className="brand-text">
             <strong>EDS Analyser</strong>
-            <span>crawler dashboard</span>
-          </div>
+            <span>Edge Delivery crawler</span>
+          </span>
         </div>
 
-        <form className="scan-form" onSubmit={onStartScan}>
-          <label htmlFor="site-url">EDS URL</label>
-          <div className="input-row">
+        <form className="scanbar" onSubmit={onStartScan}>
+          <label htmlFor="site-url" className="sr-only">EDS URL</label>
+          <div className="scanbar-field">
+            <Search size={18} className="scanbar-icon" aria-hidden />
             <input
               id="site-url"
               value={url}
               onChange={(event) => setUrl(event.target.value)}
-              placeholder="https://example.com"
+              placeholder="Enter an EDS site URL to analyse…"
               disabled={loading || isRunning}
             />
-            <button type="submit" className="icon-button primary" disabled={loading || isRunning || !url.trim()} title="Start scan">
-              {loading ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
+            <button type="submit" className="btn btn-primary" disabled={loading || isRunning || !url.trim()} title="Start scan">
+              {loading ? <Loader2 className="spin" size={17} /> : <Play size={16} strokeWidth={2.6} />}
+              <span className="btn-label">Analyse</span>
             </button>
           </div>
-          {isRunning && (
-            <button type="button" className="ghost action-row" onClick={onCancelScan}>
-              <StopCircle size={17} />
-              Cancel scan
-            </button>
-          )}
         </form>
 
-        <nav className="tabs">
-          {tabs.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button key={item.id} type="button" className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}>
-                <Icon size={17} />
-                {item.label}
-              </button>
-            );
-          })}
-        </nav>
-      </aside>
-
-      <main className="workspace">
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">Site health</p>
-            <h1>{summary ? readableHost(summary.rootUrl) : 'Ready to crawl'}</h1>
-          </div>
+        <div className="appbar-status">
+          {isRunning && (
+            <button type="button" className="btn btn-ghost btn-danger" onClick={onCancelScan}>
+              <StopCircle size={16} />
+              <span className="btn-label">Cancel</span>
+            </button>
+          )}
           <div className={`status-pill ${summary?.status || 'idle'}`}>
-            {isRunning && <Loader2 className="spin" size={16} />}
+            <span className={`status-dot ${isRunning ? 'pulse' : ''}`} aria-hidden />
             {summary?.status || 'idle'}
           </div>
-        </header>
+        </div>
+      </header>
+
+      <nav className="tabrail" aria-label="Sections">
+        {tabs.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button key={item.id} type="button" className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}>
+              <Icon size={17} />
+              {item.label}
+            </button>
+          );
+        })}
+      </nav>
+
+      <main className="canvas">
+        <section className="hero">
+          <div className="hero-title">
+            <p className="eyebrow">Site health</p>
+            <h1>{summary ? readableHost(summary.rootUrl) : 'Ready to crawl'}</h1>
+            {summary && <span className="hero-phase">{phaseLabel(summary)}</span>}
+          </div>
+          {summary && (
+            <div className="hero-health">
+              <ScoreBadge score={summary.scores.health} />
+              <span>Health score</span>
+            </div>
+          )}
+        </section>
 
         {error && (
-          <div className="alert">
+          <div className="alert" role="alert">
             <OctagonX size={18} />
             {error}
           </div>
@@ -256,9 +268,10 @@ export default function App() {
         )}
 
         {events.length > 0 && (
-          <section className="event-strip">
+          <section className="event-strip" aria-label="Live activity">
             {events.map((event) => (
               <span key={`${event.timestamp}-${event.type}-${event.pageUrl || ''}`}>
+                <span className="event-dot" aria-hidden />
                 {event.type.replace('-', ' ')}
                 {event.pageUrl ? `: ${compactURL(event.pageUrl)}` : event.message ? `: ${event.message}` : ''}
               </span>
@@ -304,7 +317,7 @@ function NotEdsModal({ onClose }: { onClose: () => void }) {
           This doesn&apos;t look like an Edge Delivery Services site &mdash; we couldn&apos;t find
           <code>/scripts/aem.js</code> at that origin. Please enter a valid EDS site URL.
         </p>
-        <button type="button" className="ghost action-row modal-action" onClick={onClose}>
+        <button type="button" className="btn btn-dark modal-action" onClick={onClose}>
           Got it
         </button>
       </div>
@@ -342,7 +355,7 @@ function Overview({ scan, onAuditAll, auditBusy }: { scan: ScanResult; onAuditAl
         <p className="panel-note">{lighthouseLabel(scan.summary)}</p>
         <button
           type="button"
-          className="ghost action-row"
+          className="btn btn-dark"
           onClick={onAuditAll}
           disabled={auditBusy || scan.pages.length === 0}
           title="Run Lighthouse on every page in this scan"
@@ -598,16 +611,30 @@ function HistoryView({ history, currentID, onOpen }: { history: ScanSummary[]; c
 function EmptyState({ history, onOpen }: { history: ScanSummary[]; onOpen: (id: string) => void }) {
   return (
     <section className="empty-state">
-      <div>
-        <Activity size={24} />
+      <div className="empty-hero">
+        <span className="empty-icon">
+          <FileSearch size={30} strokeWidth={1.8} />
+        </span>
         <h2>No scan selected</h2>
+        <p>
+          Paste an Edge Delivery Services URL in the bar above and hit Analyse. We&apos;ll crawl the site,
+          map its blocks, links and SEO, then run Lighthouse audits.
+        </p>
       </div>
-      {history.slice(0, 4).map((item) => (
-        <button key={item.id} type="button" onClick={() => onOpen(item.id)}>
-          <span>{readableHost(item.rootUrl)}</span>
-          <ScoreBadge score={item.scores.health} />
-        </button>
-      ))}
+      {history.length > 0 && (
+        <div className="empty-recent">
+          <p className="eyebrow">Recent scans</p>
+          <div className="recent-grid">
+            {history.slice(0, 4).map((item) => (
+              <button key={item.id} type="button" className="recent-card" onClick={() => onOpen(item.id)}>
+                <span className="recent-host">{readableHost(item.rootUrl)}</span>
+                <span className="recent-meta">{item.fastCompletedPages}/{item.discoveredPages} pages</span>
+                <ScoreBadge score={item.scores.health} />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -653,14 +680,15 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: '
 }
 
 function ScoreGauge({ label, score }: { label: string; score: number | null }) {
-  const width = Math.max(0, Math.min(100, score || 0));
+  const value = Math.max(0, Math.min(100, score || 0));
+  const tone = scoreTone(score);
   return (
-    <div className="score-gauge">
-      <div className="score-label">
-        <span>{label}</span>
+    <div className={`score-gauge ${tone}`}>
+      <div className="gauge-ring" style={{ ['--value' as string]: value } as React.CSSProperties}>
+        <span className="gauge-track" aria-hidden />
         <strong>{formatScore(score)}</strong>
       </div>
-      <div className="bar"><span style={{ width: `${width}%` }} /></div>
+      <span className="gauge-label">{label}</span>
     </div>
   );
 }
