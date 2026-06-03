@@ -1,4 +1,4 @@
-import type { PageResult, ScanResult, ScanSummary } from './types';
+import type { ComparedPage, ComparisonResult, ComparisonSummary, PageResult, ScanResult, ScanSummary } from './types';
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -45,6 +45,27 @@ export function reauditScan(id: string, mode: 'all' | 'top' = 'all'): Promise<Sc
   }).then(normalizeSummary);
 }
 
+export function listComparisons(): Promise<ComparisonSummary[]> {
+  return request<ComparisonSummary[] | null>('/api/comparisons').then((comparisons) =>
+    Array.isArray(comparisons) ? comparisons.map(normalizeComparisonSummary) : [],
+  );
+}
+
+export function startComparison(sourceUrl: string, edsUrl: string, crawlLimit: number | null = null): Promise<ComparisonSummary> {
+  return request<ComparisonSummary>('/api/comparisons', {
+    method: 'POST',
+    body: JSON.stringify({ sourceUrl, edsUrl, crawlLimit }),
+  }).then(normalizeComparisonSummary);
+}
+
+export function getComparison(id: string): Promise<ComparisonResult> {
+  return request<ComparisonResult>(`/api/comparisons/${id}`).then(normalizeComparisonResult);
+}
+
+export function cancelComparison(id: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/comparisons/${id}/cancel`, { method: 'POST' });
+}
+
 function normalizeScanResult(result: ScanResult): ScanResult {
   const pages = (result.pages || []).map(normalizePage);
   return {
@@ -60,8 +81,42 @@ function normalizeScanResult(result: ScanResult): ScanResult {
       ...section,
       pages: section.pages || [],
     })),
-    links: result.links || { total: 0, internal: 0, external: 0, asset: 0, mail: 0, tel: 0, hash: 0, uniqueInternal: 0, uniqueExternal: 0 },
+    links: result.links || { total: 0, internal: 0, external: 0, asset: 0, mail: 0, tel: 0, hash: 0, uniqueInternal: 0, uniqueExternal: 0, uniqueAsset: 0 },
     seo: result.seo || { missingTitle: 0, missingDescription: 0, missingH1: 0, missingCanonical: 0, missingOgTitle: 0, missingOgImage: 0, missingOgUrl: 0 },
+  };
+}
+
+function normalizeComparisonResult(result: ComparisonResult): ComparisonResult {
+  const matched = (result.matched || []).map(normalizeComparedPage);
+  return {
+    ...result,
+    summary: normalizeComparisonSummary(result.summary),
+    matched,
+    missingInEDS: (result.missingInEDS || []).map(normalizePage),
+    extraInEDS: (result.extraInEDS || []).map(normalizePage),
+    sourceFetchFailures: (result.sourceFetchFailures || []).map(normalizePage),
+    edsFetchFailures: (result.edsFetchFailures || []).map(normalizePage),
+    blocks: (result.blocks || []).map((block) => ({
+      ...block,
+      variations: block.variations || {},
+      pages: block.pages || [],
+    })),
+    sections: (result.sections || []).map((section) => ({
+      ...section,
+      pages: section.pages || [],
+    })),
+    links: result.links || {
+      sourceTotal: 0,
+      edsTotal: 0,
+      missingInternal: 0,
+      addedInternal: 0,
+      missingExternal: 0,
+      addedExternal: 0,
+      missingAssets: 0,
+      addedAssets: 0,
+      matchedPageDiffs: 0,
+    },
+    seo: result.seo || { metadataDiffs: 0, titleDiffs: 0, h1Diffs: 0, descriptionDiffs: 0, ogDiffs: 0 },
   };
 }
 
@@ -74,6 +129,44 @@ function normalizeSummary(summary: ScanSummary): ScanSummary {
     auditCompletedPages: summary.auditCompletedPages ?? 0,
     auditFailedPages: summary.auditFailedPages ?? 0,
     scores: summary.scores || { performance: null, accessibility: null, bestPractices: null, seo: null, health: null },
+  };
+}
+
+function normalizeComparisonSummary(summary: ComparisonSummary): ComparisonSummary {
+  return {
+    ...summary,
+    phase: summary.phase || summary.status || 'idle',
+    sourcePages: summary.sourcePages ?? 0,
+    edsPages: summary.edsPages ?? 0,
+    matchedPages: summary.matchedPages ?? 0,
+    missingInEDS: summary.missingInEDS ?? 0,
+    extraInEDS: summary.extraInEDS ?? 0,
+    sourceFetchFailures: summary.sourceFetchFailures ?? 0,
+    edsFetchFailures: summary.edsFetchFailures ?? 0,
+    metadataDiffs: summary.metadataDiffs ?? 0,
+    linkDiffs: summary.linkDiffs ?? 0,
+    visualQueued: summary.visualQueued ?? 0,
+    visualCompleted: summary.visualCompleted ?? 0,
+    visualFailed: summary.visualFailed ?? 0,
+    visualReview: summary.visualReview ?? 0,
+    visualFail: summary.visualFail ?? 0,
+    lighthouseQueued: summary.lighthouseQueued ?? 0,
+    lighthouseCompleted: summary.lighthouseCompleted ?? 0,
+    lighthouseFailed: summary.lighthouseFailed ?? 0,
+    migrationScore: summary.migrationScore ?? null,
+  };
+}
+
+function normalizeComparedPage(page: ComparedPage): ComparedPage {
+  return {
+    ...page,
+    source: normalizePage(page.source || ({} as PageResult)),
+    eds: normalizePage(page.eds || ({} as PageResult)),
+    fieldDiffs: page.fieldDiffs || [],
+    linkDiffs: page.linkDiffs || [],
+    visuals: page.visuals || [],
+    issues: page.issues || [],
+    status: page.status || 'pass',
   };
 }
 

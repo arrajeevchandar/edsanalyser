@@ -130,6 +130,100 @@ export interface ScanResult {
   generatedAt: string;
 }
 
+export interface ComparisonSummary {
+  id: string;
+  sourceInputUrl: string;
+  edsInputUrl: string;
+  sourceRootUrl: string;
+  edsRootUrl: string;
+  status: string;
+  phase: string;
+  startedAt: string;
+  finishedAt?: string;
+  sourcePages: number;
+  edsPages: number;
+  matchedPages: number;
+  missingInEDS: number;
+  extraInEDS: number;
+  sourceFetchFailures: number;
+  edsFetchFailures: number;
+  metadataDiffs: number;
+  linkDiffs: number;
+  visualQueued: number;
+  visualCompleted: number;
+  visualFailed: number;
+  visualReview: number;
+  visualFail: number;
+  lighthouseQueued: number;
+  lighthouseCompleted: number;
+  lighthouseFailed: number;
+  migrationScore: NullableScore;
+  error?: string;
+}
+
+export interface FieldDiff {
+  field: string;
+  source: string;
+  eds: string;
+  status: string;
+}
+
+export interface VisualDiff {
+  viewport: string;
+  sourceImage: string;
+  edsImage: string;
+  diffImage: string;
+  diffPercent: number;
+  status: string;
+  error?: string;
+}
+
+export interface ComparedPage {
+  path: string;
+  status: string;
+  severity: number;
+  source: PageResult;
+  eds: PageResult;
+  fieldDiffs: FieldDiff[];
+  linkDiffs: FieldDiff[];
+  visuals: VisualDiff[];
+  issues: string[];
+}
+
+export interface ComparisonLinks {
+  sourceTotal: number;
+  edsTotal: number;
+  missingInternal: number;
+  addedInternal: number;
+  missingExternal: number;
+  addedExternal: number;
+  missingAssets: number;
+  addedAssets: number;
+  matchedPageDiffs: number;
+}
+
+export interface ComparisonSEO {
+  metadataDiffs: number;
+  titleDiffs: number;
+  h1Diffs: number;
+  descriptionDiffs: number;
+  ogDiffs: number;
+}
+
+export interface ComparisonResult {
+  summary: ComparisonSummary;
+  matched: ComparedPage[];
+  missingInEDS: PageResult[];
+  extraInEDS: PageResult[];
+  sourceFetchFailures: PageResult[];
+  edsFetchFailures: PageResult[];
+  blocks: BlockStat[];
+  sections: SectionStat[];
+  links: ComparisonLinks;
+  seo: ComparisonSEO;
+  generatedAt: string;
+}
+
 export interface ScanEvent {
   type: string;
   scanId: string;

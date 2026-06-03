@@ -18,6 +18,7 @@ import (
 type ServiceOptions struct {
 	HTTPClient *http.Client
 	Lighthouse LighthouseRunner
+	Visual     VisualRunner
 	Workers    int
 }
 
@@ -38,6 +39,7 @@ type Service struct {
 	store      Store
 	client     *http.Client
 	lighthouse LighthouseRunner
+	visual     VisualRunner
 	workers    int
 
 	mu      sync.Mutex
@@ -54,6 +56,10 @@ func NewService(store Store, opts ServiceOptions) *Service {
 	if lighthouse == nil {
 		lighthouse = NoopLighthouseRunner{}
 	}
+	visual := opts.Visual
+	if visual == nil {
+		visual = NewChromeVisualRunner()
+	}
 	workers := opts.Workers
 	if workers <= 0 {
 		workers = 4
@@ -62,6 +68,7 @@ func NewService(store Store, opts ServiceOptions) *Service {
 		store:      store,
 		client:     client,
 		lighthouse: lighthouse,
+		visual:     visual,
 		workers:    workers,
 		cancels:    map[string]context.CancelFunc{},
 		events:     map[string][]chan Event{},

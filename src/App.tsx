@@ -25,31 +25,77 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react';
-import { cancelScan, checkEds, getScan, listScans, reauditScan, startScan } from './api';
-import type { BlockStat, PageResult, ScanEvent, ScanResult, ScanSummary, SectionStat } from './types';
+import {
+  cancelComparison,
+  cancelScan,
+  checkEds,
+  getComparison,
+  getScan,
+  listComparisons,
+  listScans,
+  reauditScan,
+  startComparison,
+  startScan,
+} from './api';
+import type {
+  BlockStat,
+  ComparedPage,
+  ComparisonResult,
+  ComparisonSummary,
+  PageResult,
+  ScanEvent,
+  ScanResult,
+  ScanSummary,
+  SectionStat,
+  VisualDiff,
+} from './types';
 
+type Mode = 'compare' | 'scan';
 type Tab = 'overview' | 'pages' | 'blocks' | 'links' | 'seo' | 'history';
+type CompareTab = 'overview' | 'pages' | 'visual' | 'blocks' | 'links' | 'seo' | 'history';
 
 const tabs: Array<{ id: Tab; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: 'Overview', icon: Activity },
   { id: 'pages', label: 'Pages', icon: FileSearch },
   { id: 'blocks', label: 'Blocks', icon: Boxes },
   { id: 'links', label: 'Links', icon: Link2 },
-  { id: 'seo', label: 'SEO', icon: ShieldCheck },
+  { id: 'seo', label: 'SEO / OG', icon: ShieldCheck },
+  { id: 'history', label: 'History', icon: History },
+];
+
+const compareTabs: Array<{ id: CompareTab; label: string; icon: typeof Activity }> = [
+  { id: 'overview', label: 'Overview', icon: Activity },
+  { id: 'pages', label: 'Pages', icon: FileSearch },
+  { id: 'visual', label: 'Visual', icon: PanelTop },
+  { id: 'blocks', label: 'Blocks', icon: Boxes },
+  { id: 'links', label: 'Links', icon: Link2 },
+  { id: 'seo', label: 'SEO / OG', icon: ShieldCheck },
   { id: 'history', label: 'History', icon: History },
 ];
 
 export default function App() {
+  const [mode, setMode] = useState<Mode>('compare');
   const [url, setUrl] = useState('');
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [edsUrl, setEdsUrl] = useState('');
   const [scan, setScan] = useState<ScanResult | null>(null);
+  const [comparison, setComparison] = useState<ComparisonResult | null>(null);
   const [history, setHistory] = useState<ScanSummary[]>([]);
+  const [comparisonHistory, setComparisonHistory] = useState<ComparisonSummary[]>([]);
   const [activeScan, setActiveScan] = useState<ScanSummary | null>(null);
+  const [activeComparison, setActiveComparison] = useState<ComparisonSummary | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
+  const [compareTab, setCompareTab] = useState<CompareTab>('overview');
   const [pageFilter, setPageFilter] = useState('');
+  const [compareFilter, setCompareFilter] = useState('');
   const [selectedPageURL, setSelectedPageURL] = useState<string | null>(null);
+  const [selectedComparePath, setSelectedComparePath] = useState<string | null>(null);
+  const [visualViewport, setVisualViewport] = useState<'desktop' | 'mobile'>('desktop');
   const [events, setEvents] = useState<ScanEvent[]>([]);
+  const [comparisonEvents, setComparisonEvents] = useState<ScanEvent[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [compareLoading, setCompareLoading] = useState(false);
   const [notEdsOpen, setNotEdsOpen] = useState(false);
 
   useEffect(() => {
@@ -95,6 +141,47 @@ export default function App() {
     };
   }, [activeScan?.id, activeScan?.status]);
 
+  useEffect(() => {
+    if (!activeComparison || activeComparison.status !== 'running') {
+      return undefined;
+    }
+    const source = new EventSource(`/api/comparisons/${activeComparison.id}/events`);
+    const eventNames = [
+      'start',
+      'source-discovered',
+      'source-page-start',
+      'source-page-analyzed',
+      'eds-discovered',
+      'eds-page-start',
+      'eds-page-analyzed',
+      'matching',
+      'fast-complete',
+      'comparison-audit-complete',
+      'visual-complete',
+      'cancel',
+      'complete',
+    ];
+    const handleEvent = (message: MessageEvent) => {
+      const parsed = JSON.parse(message.data) as ScanEvent;
+      setComparisonEvents((current) => [parsed, ...current].slice(0, 10));
+      if (['source-page-analyzed', 'eds-page-analyzed', 'matching', 'fast-complete', 'comparison-audit-complete', 'visual-complete', 'complete'].includes(parsed.type)) {
+        void loadComparison(activeComparison.id);
+      }
+      if (parsed.type === 'complete') {
+        void refreshHistory();
+        source.close();
+      }
+    };
+    eventNames.forEach((name) => source.addEventListener(name, handleEvent));
+    source.onerror = () => {
+      source.close();
+    };
+    return () => {
+      eventNames.forEach((name) => source.removeEventListener(name, handleEvent));
+      source.close();
+    };
+  }, [activeComparison?.id, activeComparison?.status]);
+
   const selectedPage = useMemo(() => {
     if (!scan?.pages.length) {
       return null;
@@ -117,9 +204,33 @@ export default function App() {
     );
   }, [scan, pageFilter]);
 
+  const selectedComparedPage = useMemo(() => {
+    if (!comparison?.matched.length) {
+      return null;
+    }
+    return comparison.matched.find((page) => page.path === selectedComparePath) || comparison.matched[0];
+  }, [comparison, selectedComparePath]);
+
+  const filteredComparedPages = useMemo(() => {
+    const value = compareFilter.trim().toLowerCase();
+    if (!comparison) {
+      return [];
+    }
+    if (!value) {
+      return comparison.matched;
+    }
+    return comparison.matched.filter((page) =>
+      [page.path, page.status, page.source.title, page.eds.title, ...page.issues]
+        .filter((item): item is string => Boolean(item))
+        .some((item) => item.toLowerCase().includes(value)),
+    );
+  }, [comparison, compareFilter]);
+
   async function refreshHistory() {
     try {
-      setHistory(await listScans());
+      const [scanItems, comparisonItems] = await Promise.all([listScans(), listComparisons()]);
+      setHistory(scanItems);
+      setComparisonHistory(comparisonItems);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load history');
     }
@@ -133,6 +244,17 @@ export default function App() {
       setSelectedPageURL((current) => current || result.pages[0]?.url || null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load scan');
+    }
+  }
+
+  async function loadComparison(id: string) {
+    try {
+      const result = await getComparison(id);
+      setComparison(result);
+      setActiveComparison(result.summary);
+      setSelectedComparePath((current) => current || result.matched[0]?.path || null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load comparison');
     }
   }
 
@@ -160,11 +282,50 @@ export default function App() {
     }
   }
 
+  async function onStartComparison(event: React.FormEvent) {
+    event.preventDefault();
+    setError('');
+    setComparisonEvents([]);
+    setCompareLoading(true);
+    try {
+      const created = await startComparison(sourceUrl, edsUrl, null);
+      setActiveComparison(created);
+      setComparison({
+        summary: created,
+        matched: [],
+        missingInEDS: [],
+        extraInEDS: [],
+        sourceFetchFailures: [],
+        edsFetchFailures: [],
+        blocks: [],
+        sections: [],
+        links: emptyComparisonLinks,
+        seo: emptyComparisonSEO,
+        generatedAt: new Date().toISOString(),
+      });
+      setSelectedComparePath(null);
+      setCompareTab('overview');
+      setMode('compare');
+      await refreshHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to start comparison');
+    } finally {
+      setCompareLoading(false);
+    }
+  }
+
   async function onCancelScan() {
     if (!activeScan) {
       return;
     }
     await cancelScan(activeScan.id).catch((err) => setError(err instanceof Error ? err.message : 'Unable to cancel scan'));
+  }
+
+  async function onCancelComparison() {
+    if (!activeComparison) {
+      return;
+    }
+    await cancelComparison(activeComparison.id).catch((err) => setError(err instanceof Error ? err.message : 'Unable to cancel comparison'));
   }
 
   async function onAuditAll() {
@@ -184,7 +345,10 @@ export default function App() {
   }
 
   const summary = scan?.summary || activeScan;
-  const isRunning = summary?.status === 'running';
+  const comparisonSummary = comparison?.summary || activeComparison;
+  const isScanRunning = summary?.status === 'running';
+  const isCompareRunning = comparisonSummary?.status === 'running';
+  const isRunning = mode === 'scan' ? isScanRunning : isCompareRunning;
 
   return (
     <div className="app">
@@ -199,43 +363,86 @@ export default function App() {
           </span>
         </div>
 
-        <form className="scanbar" onSubmit={onStartScan}>
-          <label htmlFor="site-url" className="sr-only">EDS URL</label>
-          <div className="scanbar-field">
-            <Search size={18} className="scanbar-icon" aria-hidden />
-            <input
-              id="site-url"
-              value={url}
-              onChange={(event) => setUrl(event.target.value)}
-              placeholder="Enter an EDS site URL to analyse..."
-              disabled={loading || isRunning}
-            />
-            <button type="submit" className="btn btn-primary" disabled={loading || isRunning || !url.trim()} title="Start scan">
-              {loading ? <Loader2 className="spin" size={17} /> : <Play size={16} strokeWidth={2.6} />}
-              <span className="btn-label">Analyse</span>
-            </button>
-          </div>
-        </form>
+        <div className="mode-switch" role="group" aria-label="Dashboard mode">
+          <button type="button" className={mode === 'compare' ? 'active' : ''} onClick={() => setMode('compare')}>Compare</button>
+          <button type="button" className={mode === 'scan' ? 'active' : ''} onClick={() => setMode('scan')}>Scan</button>
+        </div>
+
+        {mode === 'scan' ? (
+          <form className="scanbar" onSubmit={onStartScan}>
+            <label htmlFor="site-url" className="sr-only">EDS URL</label>
+            <div className="scanbar-field">
+              <Search size={18} className="scanbar-icon" aria-hidden />
+              <input
+                id="site-url"
+                value={url}
+                onChange={(event) => setUrl(event.target.value)}
+                placeholder="Enter an EDS site URL to analyse..."
+                disabled={loading || isScanRunning}
+              />
+              <button type="submit" className="btn btn-primary" disabled={loading || isScanRunning || !url.trim()} title="Start scan">
+                {loading ? <Loader2 className="spin" size={17} /> : <Play size={16} strokeWidth={2.6} />}
+                <span className="btn-label">Analyse</span>
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form className="comparebar" onSubmit={onStartComparison}>
+            <label htmlFor="source-url" className="sr-only">Legacy site URL</label>
+            <label htmlFor="eds-url" className="sr-only">Migrated EDS URL</label>
+            <div className="comparebar-fields">
+              <div className="comparebar-field">
+                <span>Legacy</span>
+                <input
+                  id="source-url"
+                  value={sourceUrl}
+                  onChange={(event) => setSourceUrl(event.target.value)}
+                  placeholder="Non-EDS source URL"
+                  disabled={compareLoading || isCompareRunning}
+                />
+              </div>
+              <div className="comparebar-field">
+                <span>EDS</span>
+                <input
+                  id="eds-url"
+                  value={edsUrl}
+                  onChange={(event) => setEdsUrl(event.target.value)}
+                  placeholder="Migrated EDS URL"
+                  disabled={compareLoading || isCompareRunning}
+                />
+              </div>
+              <button type="submit" className="btn btn-primary" disabled={compareLoading || isCompareRunning || !sourceUrl.trim() || !edsUrl.trim()} title="Start comparison">
+                {compareLoading ? <Loader2 className="spin" size={17} /> : <Play size={16} strokeWidth={2.6} />}
+                <span className="btn-label">Compare</span>
+              </button>
+            </div>
+          </form>
+        )}
 
         <div className="appbar-status">
           {isRunning && (
-            <button type="button" className="btn btn-ghost btn-danger" onClick={onCancelScan}>
+            <button type="button" className="btn btn-ghost btn-danger" onClick={mode === 'scan' ? onCancelScan : onCancelComparison}>
               <StopCircle size={16} />
               <span className="btn-label">Cancel</span>
             </button>
           )}
-          <div className={`status-pill ${summary?.status || 'idle'}`}>
+          <div className={`status-pill ${mode === 'scan' ? summary?.status || 'idle' : comparisonSummary?.status || 'idle'}`}>
             <span className={`status-dot ${isRunning ? 'pulse' : ''}`} aria-hidden />
-            {summary?.status || 'idle'}
+            {mode === 'scan' ? summary?.status || 'idle' : comparisonSummary?.status || 'idle'}
           </div>
         </div>
       </header>
 
       <nav className="tabrail" aria-label="Sections">
-        {tabs.map((item) => {
+        {(mode === 'scan' ? tabs : compareTabs).map((item) => {
           const Icon = item.icon;
           return (
-            <button key={item.id} type="button" className={tab === item.id ? 'active' : ''} onClick={() => setTab(item.id)}>
+            <button
+              key={item.id}
+              type="button"
+              className={mode === 'scan' ? tab === item.id ? 'active' : '' : compareTab === item.id ? 'active' : ''}
+              onClick={() => (mode === 'scan' ? setTab(item.id as Tab) : setCompareTab(item.id as CompareTab))}
+            >
               <Icon size={17} />
               {item.label}
             </button>
@@ -244,6 +451,8 @@ export default function App() {
       </nav>
 
       <main className="canvas">
+        {mode === 'scan' ? (
+          <>
         <section className="hero">
           <div className="hero-title">
             <p className="eyebrow">EDS site intelligence</p>
@@ -308,6 +517,26 @@ export default function App() {
         {scan && tab === 'links' && <LinksView scan={scan} />}
         {scan && tab === 'seo' && <SEOView scan={scan} />}
         {tab === 'history' && <HistoryView history={history} currentID={summary?.id} onOpen={(id) => void loadScan(id)} />}
+          </>
+        ) : (
+          <CompareDashboard
+            comparison={comparison}
+            summary={comparisonSummary}
+            history={comparisonHistory}
+            scanHistory={history}
+            tab={compareTab}
+            events={comparisonEvents}
+            error={error}
+            selectedPage={selectedComparedPage}
+            pages={filteredComparedPages}
+            pageFilter={compareFilter}
+            visualViewport={visualViewport}
+            onFilter={setCompareFilter}
+            onSelect={setSelectedComparePath}
+            onOpen={(id) => void loadComparison(id)}
+            onViewport={setVisualViewport}
+          />
+        )}
       </main>
 
       {notEdsOpen && <NotEdsModal onClose={() => setNotEdsOpen(false)} />}
@@ -335,6 +564,478 @@ function NotEdsModal({ onClose }: { onClose: () => void }) {
         </button>
       </div>
     </div>
+  );
+}
+
+function CompareDashboard({
+  comparison,
+  summary,
+  history,
+  scanHistory,
+  tab,
+  events,
+  error,
+  selectedPage,
+  pages,
+  pageFilter,
+  visualViewport,
+  onFilter,
+  onSelect,
+  onOpen,
+  onViewport,
+}: {
+  comparison: ComparisonResult | null;
+  summary: ComparisonSummary | null;
+  history: ComparisonSummary[];
+  scanHistory: ScanSummary[];
+  tab: CompareTab;
+  events: ScanEvent[];
+  error: string;
+  selectedPage: ComparedPage | null;
+  pages: ComparedPage[];
+  pageFilter: string;
+  visualViewport: 'desktop' | 'mobile';
+  onFilter: (value: string) => void;
+  onSelect: (value: string) => void;
+  onOpen: (id: string) => void;
+  onViewport: (value: 'desktop' | 'mobile') => void;
+}) {
+  return (
+    <>
+      <section className="hero">
+        <div className="hero-title">
+          <p className="eyebrow">Migration comparison</p>
+          <h1>{summary ? `${readableHost(summary.sourceRootUrl)} to ${readableHost(summary.edsRootUrl)}` : 'Compare legacy to EDS'}</h1>
+          <p className="hero-copy">
+            {summary
+              ? `${comparisonPhaseLabel(summary)} - path-matched migration checks, visual diffs, SEO parity, links, blocks, and Lighthouse deltas.`
+              : 'Enter a legacy site URL and its migrated EDS URL to find missing pages, metadata drift, link changes, block issues, and visual regressions.'}
+          </p>
+          {summary && <span className="hero-phase">{comparisonPhaseLabel(summary)}</span>}
+        </div>
+        {summary && (
+          <div className="hero-health">
+            <ScoreBadge score={summary.migrationScore} />
+            <span>Migration score</span>
+          </div>
+        )}
+      </section>
+
+      {error && (
+        <div className="alert" role="alert">
+          <OctagonX size={18} />
+          {error}
+        </div>
+      )}
+
+      {summary && (
+        <section className="progress-band compact">
+          <Metric label="Phase" value={comparisonPhaseLabel(summary)} />
+          <Metric label="Matched" value={summary.matchedPages.toString()} />
+          <Metric label="Missing" value={summary.missingInEDS.toString()} tone={summary.missingInEDS ? 'bad' : 'good'} />
+          <Metric label="Visual" value={`${summary.visualCompleted}/${summary.visualQueued}`} />
+          <Metric label="Lighthouse" value={`${summary.lighthouseCompleted}/${summary.lighthouseQueued}`} />
+        </section>
+      )}
+
+      {events.length > 0 && (
+        <section className="event-strip" aria-label="Live comparison activity">
+          {events.map((event) => (
+            <span key={`${event.timestamp}-${event.type}-${event.pageUrl || ''}`}>
+              <span className="event-dot" aria-hidden />
+              {event.type.replace(/-/g, ' ')}
+              {event.pageUrl ? `: ${compactURL(event.pageUrl)}` : event.message ? `: ${event.message}` : ''}
+            </span>
+          ))}
+        </section>
+      )}
+
+      {!comparison && <CompareEmptyState history={history} onOpen={onOpen} />}
+
+      {comparison && tab === 'overview' && <ComparisonOverview comparison={comparison} />}
+      {comparison && tab === 'pages' && (
+        <ComparisonPagesView
+          comparison={comparison}
+          pages={pages}
+          selectedPage={selectedPage}
+          pageFilter={pageFilter}
+          onFilter={onFilter}
+          onSelect={onSelect}
+          visualViewport={visualViewport}
+          onViewport={onViewport}
+        />
+      )}
+      {comparison && tab === 'visual' && <ComparisonVisualView pages={comparison.matched} viewport={visualViewport} onViewport={onViewport} />}
+      {comparison && tab === 'blocks' && <ComparisonBlocksView comparison={comparison} />}
+      {comparison && tab === 'links' && <ComparisonLinksView comparison={comparison} />}
+      {comparison && tab === 'seo' && <ComparisonSEOView comparison={comparison} />}
+      {tab === 'history' && <ComparisonHistoryView history={history} scanHistory={scanHistory} currentID={summary?.id} onOpen={onOpen} />}
+    </>
+  );
+}
+
+function CompareEmptyState({ history, onOpen }: { history: ComparisonSummary[]; onOpen: (id: string) => void }) {
+  return (
+    <section className="empty-state">
+      <div className="empty-hero">
+        <span className="empty-icon">
+          <Route size={30} strokeWidth={1.8} />
+        </span>
+        <h2>No comparison selected</h2>
+        <p>
+          Add a legacy URL and a migrated EDS URL in the bar above. The crawler will match paths,
+          compare content signals, and run visual checks for desktop and mobile.
+        </p>
+      </div>
+      {history.length > 0 && (
+        <div className="empty-recent">
+          <p className="eyebrow">Recent comparisons</p>
+          <div className="recent-grid">
+            {history.slice(0, 4).map((item) => (
+              <button key={item.id} type="button" className="recent-card" onClick={() => onOpen(item.id)}>
+                <span className="recent-host">{readableHost(item.sourceRootUrl)} to {readableHost(item.edsRootUrl)}</span>
+                <span className="recent-meta">{item.matchedPages} matched / {item.missingInEDS} missing</span>
+                <ScoreBadge score={item.migrationScore} />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ComparisonOverview({ comparison }: { comparison: ComparisonResult }) {
+  const summary = comparison.summary;
+  const issuePages = comparison.matched.filter((page) => page.status !== 'pass').length;
+  const zeroBlockPages = comparison.matched.filter((page) => page.eds.blockCount === 0).length;
+  const cards = [
+    { label: 'Matched paths', value: summary.matchedPages.toString(), detail: `${summary.sourcePages} source, ${summary.edsPages} EDS`, tone: 'good' as const, icon: <Route size={18} /> },
+    { label: 'Missing in EDS', value: summary.missingInEDS.toString(), detail: 'Legacy pages without migrated match', tone: summary.missingInEDS ? 'bad' as const : 'good' as const, icon: <OctagonX size={18} /> },
+    { label: 'Page issues', value: issuePages.toString(), detail: 'Matched pages needing review', tone: issuePages ? 'warn' as const : 'good' as const, icon: <AlertCircle size={18} /> },
+    { label: 'Visual failures', value: summary.visualFail.toString(), detail: `${summary.visualReview} visual reviews`, tone: summary.visualFail ? 'bad' as const : summary.visualReview ? 'warn' as const : 'good' as const, icon: <PanelTop size={18} /> },
+  ];
+  return (
+    <section className="overview-stack">
+      <section className="insight-hero-panel">
+        <div className="insight-narrative">
+          <p className="eyebrow">Migration readout</p>
+          <h2>{comparisonReadout(comparison)}</h2>
+          <p>Start with missing pages and visual failures, then drill into page-level metadata, link, block, and screenshot differences.</p>
+        </div>
+        <div className="insight-card-grid">
+          {cards.map((item) => <InsightCard key={item.label} {...item} />)}
+        </div>
+      </section>
+      <section className="overview-grid">
+        <div className="panel priority-panel">
+          <div className="panel-heading"><h2>Priority checks</h2><ClipboardList size={19} /></div>
+          <div className="issue-stack">
+            <IssueItem label="Missing pages" detail={`${summary.missingInEDS} source paths are not present in EDS.`} tone={summary.missingInEDS ? 'bad' : 'good'} />
+            <IssueItem label="Metadata drift" detail={`${summary.metadataDiffs} title, H1, SEO, canonical, or OG differences.`} tone={summary.metadataDiffs ? 'warn' : 'good'} />
+            <IssueItem label="Link drift" detail={`${summary.linkDiffs} matched page link differences.`} tone={summary.linkDiffs ? 'warn' : 'good'} />
+            <IssueItem label="EDS block coverage" detail={`${zeroBlockPages} matched EDS pages have no detected blocks.`} tone={zeroBlockPages ? 'warn' : 'good'} />
+          </div>
+        </div>
+        <div className="panel">
+          <div className="panel-heading"><h2>Coverage</h2><FileSearch size={19} /></div>
+          <div className="mini-grid">
+            <Metric label="Source pages" value={summary.sourcePages.toString()} />
+            <Metric label="EDS pages" value={summary.edsPages.toString()} />
+            <Metric label="Extra EDS" value={summary.extraInEDS.toString()} tone={summary.extraInEDS ? 'warn' : 'good'} />
+            <Metric label="Fetch failures" value={(summary.sourceFetchFailures + summary.edsFetchFailures).toString()} tone={summary.sourceFetchFailures + summary.edsFetchFailures ? 'bad' : 'good'} />
+          </div>
+        </div>
+        <div className="panel">
+          <div className="panel-heading"><h2>Visual checks</h2><PanelTop size={19} /></div>
+          <div className="mini-grid">
+            <Metric label="Queued" value={summary.visualQueued.toString()} />
+            <Metric label="Complete" value={summary.visualCompleted.toString()} />
+            <Metric label="Review" value={summary.visualReview.toString()} tone={summary.visualReview ? 'warn' : 'good'} />
+            <Metric label="Fail" value={summary.visualFail.toString()} tone={summary.visualFail ? 'bad' : 'good'} />
+          </div>
+        </div>
+        <div className="panel">
+          <div className="panel-heading"><h2>Lighthouse</h2><BarChart3 size={19} /></div>
+          <div className="mini-grid">
+            <Metric label="Queued" value={summary.lighthouseQueued.toString()} />
+            <Metric label="Complete" value={summary.lighthouseCompleted.toString()} />
+            <Metric label="Failed" value={summary.lighthouseFailed.toString()} tone={summary.lighthouseFailed ? 'warn' : 'good'} />
+          </div>
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function ComparisonPagesView({
+  comparison,
+  pages,
+  selectedPage,
+  pageFilter,
+  onFilter,
+  onSelect,
+  visualViewport,
+  onViewport,
+}: {
+  comparison: ComparisonResult;
+  pages: ComparedPage[];
+  selectedPage: ComparedPage | null;
+  pageFilter: string;
+  onFilter: (value: string) => void;
+  onSelect: (value: string) => void;
+  visualViewport: 'desktop' | 'mobile';
+  onViewport: (value: 'desktop' | 'mobile') => void;
+}) {
+  return (
+    <section className="page-workspace">
+      <div className="section-toolbar">
+        <div>
+          <p className="eyebrow">Matched pages</p>
+          <h2>Review migration parity by path</h2>
+        </div>
+        <div className="search-field">
+          <Search size={16} />
+          <input value={pageFilter} onChange={(event) => onFilter(event.target.value)} placeholder="Filter compared pages" />
+        </div>
+      </div>
+      <div className="summary-ribbon">
+        <Metric label="Matched" value={comparison.summary.matchedPages.toString()} />
+        <Metric label="Missing" value={comparison.summary.missingInEDS.toString()} tone={comparison.summary.missingInEDS ? 'bad' : 'good'} />
+        <Metric label="Extra" value={comparison.summary.extraInEDS.toString()} tone={comparison.summary.extraInEDS ? 'warn' : 'good'} />
+        <Metric label="Reviews" value={comparison.matched.filter((page) => page.status === 'review').length.toString()} />
+        <Metric label="Fails" value={comparison.matched.filter((page) => page.status === 'fail').length.toString()} tone={comparison.matched.some((page) => page.status === 'fail') ? 'bad' : 'good'} />
+      </div>
+      <section className="pages-layout">
+        <div className="panel table-panel">
+          <div className="panel-heading"><h2>Matched paths</h2><span className="panel-count">{pages.length} shown</span></div>
+          <div className="table-scroll page-table-scroll">
+            <table>
+              <thead><tr><th>Path</th><th>Status</th><th>Fields</th><th>Links</th><th>Visual</th></tr></thead>
+              <tbody>
+                {pages.map((page) => (
+                  <tr key={page.path} onClick={() => onSelect(page.path)} className={selectedPage?.path === page.path ? 'selected' : ''}>
+                    <td><span className="url-cell">{page.path}</span></td>
+                    <td><span className={`audit-status ${page.status}`}>{page.status}</span></td>
+                    <td>{page.fieldDiffs.length}</td>
+                    <td>{page.linkDiffs.length}</td>
+                    <td>{visualSummary(page.visuals)}</td>
+                  </tr>
+                ))}
+                {pages.length === 0 && <EmptyTableRow columns={5} message="No matched pages yet" />}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <ComparedPageDetail page={selectedPage} viewport={visualViewport} onViewport={onViewport} />
+      </section>
+    </section>
+  );
+}
+
+function ComparedPageDetail({ page, viewport, onViewport }: { page: ComparedPage | null; viewport: 'desktop' | 'mobile'; onViewport: (value: 'desktop' | 'mobile') => void }) {
+  if (!page) {
+    return <div className="panel detail-panel page-inspector"><h2>Page detail</h2><EmptyInline message="Select a matched page to inspect migration differences." /></div>;
+  }
+  const visual = page.visuals.find((item) => item.viewport === viewport);
+  return (
+    <div className="panel detail-panel page-inspector compare-inspector">
+      <div className="inspector-head">
+        <div>
+          <p className="eyebrow">Compared path</p>
+          <h2>{page.path}</h2>
+          <span>{page.source.title || 'Source title missing'} to {page.eds.title || 'EDS title missing'}</span>
+        </div>
+        <span className={`audit-status ${page.status}`}>{page.status}</span>
+      </div>
+      <div className="compare-columns">
+        <SideBySideMeta title="Legacy source" page={page.source} />
+        <SideBySideMeta title="Migrated EDS" page={page.eds} />
+      </div>
+      <div className="issue-stack tight">
+        {[...page.issues, ...page.fieldDiffs.map((diff) => `${diff.field}: ${diff.source || 'missing'} -> ${diff.eds || 'missing'}`), ...page.linkDiffs.map((diff) => diff.field)].slice(0, 8).map((issue) => (
+          <IssueItem key={issue} label={issue} detail="Review this page before launch." tone="warn" />
+        ))}
+        {page.issues.length === 0 && page.fieldDiffs.length === 0 && page.linkDiffs.length === 0 && <IssueItem label="Page parity looks good" detail="No source/EDS metadata or link differences detected." tone="good" />}
+      </div>
+      <VisualToggle viewport={viewport} onViewport={onViewport} />
+      <VisualPreview visual={visual} />
+    </div>
+  );
+}
+
+function SideBySideMeta({ title, page }: { title: string; page: PageResult }) {
+  return (
+    <div className="compare-meta-panel">
+      <h3>{title}</h3>
+      <MetaItem label="Title" value={page.title} />
+      <MetaItem label="H1" value={page.h1} />
+      <MetaItem label="Description" value={page.description} />
+      <MetaItem label="Canonical" value={page.canonical} />
+      <MetaItem label="OG image" value={page.og.image} />
+      <Metric label="Links" value={(page.linkCount || 0).toString()} />
+      <Metric label="Blocks" value={(page.blockCount || 0).toString()} />
+    </div>
+  );
+}
+
+function ComparisonVisualView({ pages, viewport, onViewport }: { pages: ComparedPage[]; viewport: 'desktop' | 'mobile'; onViewport: (value: 'desktop' | 'mobile') => void }) {
+  const visuals = pages.flatMap((page) => page.visuals.filter((visual) => visual.viewport === viewport).map((visual) => ({ page, visual })));
+  return (
+    <section className="page-workspace">
+      <div className="section-toolbar">
+        <div><p className="eyebrow">Visual diffs</p><h2>First viewport screenshot comparison</h2></div>
+        <VisualToggle viewport={viewport} onViewport={onViewport} />
+      </div>
+      <div className="visual-grid">
+        {visuals.map(({ page, visual }) => (
+          <div key={`${page.path}-${visual.viewport}`} className={`visual-card ${visual.status}`}>
+            <div className="visual-card-head">
+              <strong>{page.path}</strong>
+              <span>{visual.status} / {visual.diffPercent}%</span>
+            </div>
+            <VisualPreview visual={visual} />
+          </div>
+        ))}
+        {visuals.length === 0 && <EmptyInline message="Visual diffs have not completed yet." />}
+      </div>
+    </section>
+  );
+}
+
+function VisualToggle({ viewport, onViewport }: { viewport: 'desktop' | 'mobile'; onViewport: (value: 'desktop' | 'mobile') => void }) {
+  return (
+    <div className="segmented-control">
+      <button type="button" className={viewport === 'desktop' ? 'active' : ''} onClick={() => onViewport('desktop')}>Desktop</button>
+      <button type="button" className={viewport === 'mobile' ? 'active' : ''} onClick={() => onViewport('mobile')}>Mobile</button>
+    </div>
+  );
+}
+
+function VisualPreview({ visual }: { visual?: VisualDiff }) {
+  if (!visual) {
+    return <EmptyInline message="Visual diff pending" />;
+  }
+  if (visual.error) {
+    return <div className="warning-box">{visual.error}</div>;
+  }
+  return (
+    <div className="visual-preview">
+      {visual.sourceImage && <img src={visual.sourceImage} alt={`${visual.viewport} source screenshot`} />}
+      {visual.edsImage && <img src={visual.edsImage} alt={`${visual.viewport} EDS screenshot`} />}
+      {visual.diffImage && <img src={visual.diffImage} alt={`${visual.viewport} visual diff`} />}
+    </div>
+  );
+}
+
+function ComparisonBlocksView({ comparison }: { comparison: ComparisonResult }) {
+  const zeroBlockPages = comparison.matched.filter((page) => page.eds.blockCount === 0);
+  return (
+    <section className="page-workspace">
+      <div className="summary-ribbon">
+        <Metric label="EDS block types" value={comparison.blocks.length.toString()} />
+        <Metric label="Section variations" value={comparison.sections.length.toString()} />
+        <Metric label="Zero-block pages" value={zeroBlockPages.length.toString()} tone={zeroBlockPages.length ? 'warn' : 'good'} />
+      </div>
+      {zeroBlockPages.length > 0 && (
+        <div className="panel">
+          <div className="panel-heading"><h2>Pages with no EDS blocks</h2><AlertCircle size={19} /></div>
+          <div className="compact-list">
+            {zeroBlockPages.slice(0, 12).map((page) => <div key={page.path} className="page-signal"><span>{page.path}</span><strong>0 blocks</strong></div>)}
+          </div>
+        </div>
+      )}
+      <BlocksView blocks={comparison.blocks} sections={comparison.sections} />
+    </section>
+  );
+}
+
+function ComparisonLinksView({ comparison }: { comparison: ComparisonResult }) {
+  const diffs = comparison.matched.flatMap((page) => page.linkDiffs.map((diff) => ({ page: page.path, diff })));
+  return (
+    <section className="page-workspace">
+      <div className="summary-ribbon">
+        <Metric label="Source links" value={comparison.links.sourceTotal.toString()} />
+        <Metric label="EDS links" value={comparison.links.edsTotal.toString()} />
+        <Metric label="Missing internal" value={comparison.links.missingInternal.toString()} tone={comparison.links.missingInternal ? 'warn' : 'good'} />
+        <Metric label="Added internal" value={comparison.links.addedInternal.toString()} />
+        <Metric label="Asset diffs" value={(comparison.links.missingAssets + comparison.links.addedAssets).toString()} tone={comparison.links.missingAssets + comparison.links.addedAssets ? 'warn' : 'good'} />
+      </div>
+      <DiffTable title="Link differences" rows={diffs.map(({ page, diff }) => ({ page, field: diff.field, source: diff.source, eds: diff.eds }))} />
+    </section>
+  );
+}
+
+function ComparisonSEOView({ comparison }: { comparison: ComparisonResult }) {
+  const rows = comparison.matched.flatMap((page) => page.fieldDiffs.map((diff) => ({ page: page.path, field: diff.field, source: diff.source, eds: diff.eds })));
+  return (
+    <section className="page-workspace">
+      <div className="summary-ribbon">
+        <Metric label="Metadata diffs" value={comparison.seo.metadataDiffs.toString()} tone={comparison.seo.metadataDiffs ? 'warn' : 'good'} />
+        <Metric label="Title diffs" value={comparison.seo.titleDiffs.toString()} />
+        <Metric label="H1 diffs" value={comparison.seo.h1Diffs.toString()} />
+        <Metric label="Description diffs" value={comparison.seo.descriptionDiffs.toString()} />
+        <Metric label="OG diffs" value={comparison.seo.ogDiffs.toString()} />
+      </div>
+      <DiffTable title="SEO / OG differences" rows={rows} />
+    </section>
+  );
+}
+
+function DiffTable({ title, rows }: { title: string; rows: Array<{ page: string; field: string; source: string; eds: string }> }) {
+  return (
+    <div className="panel table-panel">
+      <div className="panel-heading"><h2>{title}</h2><span className="panel-count">{rows.length}</span></div>
+      <div className="table-scroll no-x">
+        <table className="fit-table compare-diff-table">
+          <thead><tr><th>Page</th><th>Field</th><th>Source</th><th>EDS</th></tr></thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.page}-${row.field}-${index}`}>
+                <td>{row.page}</td>
+                <td>{row.field}</td>
+                <td>{row.source || '-'}</td>
+                <td>{row.eds || '-'}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && <EmptyTableRow columns={4} message="No differences found" />}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ComparisonHistoryView({ history, scanHistory, currentID, onOpen }: { history: ComparisonSummary[]; scanHistory: ScanSummary[]; currentID?: string; onOpen: (id: string) => void }) {
+  return (
+    <section className="page-workspace">
+      <div className="summary-ribbon">
+        <Metric label="Comparisons" value={history.length.toString()} />
+        <Metric label="Scans" value={scanHistory.length.toString()} />
+        <Metric label="Running" value={history.filter((item) => item.status === 'running').length.toString()} />
+      </div>
+      <div className="panel table-panel">
+        <div className="panel-heading"><h2>Comparison history</h2><History size={19} /></div>
+        <div className="table-scroll">
+          <table>
+            <thead><tr><th>Type</th><th>Source</th><th>EDS</th><th>Matched</th><th>Score</th><th>Started</th></tr></thead>
+            <tbody>
+              {history.map((item) => (
+                <tr key={item.id} onClick={() => onOpen(item.id)} className={item.id === currentID ? 'selected' : ''}>
+                  <td>Compare</td>
+                  <td>{readableHost(item.sourceRootUrl)}</td>
+                  <td>{readableHost(item.edsRootUrl)}</td>
+                  <td>{item.matchedPages}</td>
+                  <td><ScoreBadge score={item.migrationScore} /></td>
+                  <td>{new Date(item.startedAt).toLocaleString()}</td>
+                </tr>
+              ))}
+              {history.length === 0 && <EmptyTableRow columns={6} message="No comparisons yet" />}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1154,6 +1855,61 @@ function ScoreBadge({ score }: { score: number | null }) {
   return <span className={`score-badge ${scoreTone(score)}`}>{formatScore(score)}</span>;
 }
 
+function comparisonReadout(comparison: ComparisonResult) {
+  const summary = comparison.summary;
+  if (summary.status === 'running') {
+    return 'Comparison is building: source crawl, EDS crawl, Lighthouse, and visual diffs are running in stages.';
+  }
+  if (summary.missingInEDS > 0) {
+    return `${summary.missingInEDS} legacy pages are missing from the migrated EDS site.`;
+  }
+  if (summary.visualFail > 0) {
+    return `${summary.visualFail} visual comparisons failed and should be reviewed first.`;
+  }
+  if (summary.metadataDiffs > 0 || summary.linkDiffs > 0) {
+    return `${summary.metadataDiffs + summary.linkDiffs} content, metadata, or link differences need review.`;
+  }
+  return 'Matched pages look aligned across coverage, metadata, links, and visual checks.';
+}
+
+function comparisonPhaseLabel(summary: ComparisonSummary) {
+  switch (summary.phase || summary.status) {
+    case 'source-crawl':
+      return 'Crawling source';
+    case 'eds-crawl':
+      return 'Crawling EDS';
+    case 'matching':
+      return 'Matching pages';
+    case 'fast-complete':
+      return 'Fast comparison ready';
+    case 'lighthouse':
+      return 'Running Lighthouse';
+    case 'visual-diff':
+      return 'Running visual diff';
+    case 'completed':
+      return 'Complete';
+    case 'cancelled':
+      return 'Cancelled';
+    default:
+      return summary.status || 'Idle';
+  }
+}
+
+function visualSummary(visuals: VisualDiff[]) {
+  if (!visuals.length) {
+    return 'pending';
+  }
+  const failed = visuals.filter((visual) => visual.status === 'fail' || visual.status === 'failed').length;
+  const review = visuals.filter((visual) => visual.status === 'review').length;
+  if (failed) {
+    return `${failed} fail`;
+  }
+  if (review) {
+    return `${review} review`;
+  }
+  return 'pass';
+}
+
 function siteReadout(scan: ScanResult) {
   const gaps = totalSEOGaps(scan);
   if (scan.summary.status === 'running') {
@@ -1309,3 +2065,15 @@ function compactURL(raw: string) {
 
 const emptyLinks = { total: 0, internal: 0, external: 0, asset: 0, mail: 0, tel: 0, hash: 0, uniqueInternal: 0, uniqueExternal: 0, uniqueAsset: 0 };
 const emptySEO = { missingTitle: 0, missingDescription: 0, missingH1: 0, missingCanonical: 0, missingOgTitle: 0, missingOgImage: 0, missingOgUrl: 0 };
+const emptyComparisonLinks = {
+  sourceTotal: 0,
+  edsTotal: 0,
+  missingInternal: 0,
+  addedInternal: 0,
+  missingExternal: 0,
+  addedExternal: 0,
+  missingAssets: 0,
+  addedAssets: 0,
+  matchedPageDiffs: 0,
+};
+const emptyComparisonSEO = { metadataDiffs: 0, titleDiffs: 0, h1Diffs: 0, descriptionDiffs: 0, ogDiffs: 0 };

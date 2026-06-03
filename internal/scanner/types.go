@@ -47,6 +47,100 @@ type ScanResult struct {
 	GeneratedAt time.Time     `json:"generatedAt"`
 }
 
+type ComparisonSummary struct {
+	ID                  string    `json:"id"`
+	SourceInputURL      string    `json:"sourceInputUrl"`
+	EDSInputURL         string    `json:"edsInputUrl"`
+	SourceRootURL       string    `json:"sourceRootUrl"`
+	EDSRootURL          string    `json:"edsRootUrl"`
+	Status              string    `json:"status"`
+	Phase               string    `json:"phase"`
+	StartedAt           time.Time `json:"startedAt"`
+	FinishedAt          time.Time `json:"finishedAt,omitempty"`
+	SourcePages         int       `json:"sourcePages"`
+	EDSPages            int       `json:"edsPages"`
+	MatchedPages        int       `json:"matchedPages"`
+	MissingInEDS        int       `json:"missingInEDS"`
+	ExtraInEDS          int       `json:"extraInEDS"`
+	SourceFetchFailures int       `json:"sourceFetchFailures"`
+	EDSFetchFailures    int       `json:"edsFetchFailures"`
+	MetadataDiffs       int       `json:"metadataDiffs"`
+	LinkDiffs           int       `json:"linkDiffs"`
+	VisualQueued        int       `json:"visualQueued"`
+	VisualCompleted     int       `json:"visualCompleted"`
+	VisualFailed        int       `json:"visualFailed"`
+	VisualReview        int       `json:"visualReview"`
+	VisualFail          int       `json:"visualFail"`
+	LighthouseQueued    int       `json:"lighthouseQueued"`
+	LighthouseCompleted int       `json:"lighthouseCompleted"`
+	LighthouseFailed    int       `json:"lighthouseFailed"`
+	MigrationScore      *float64  `json:"migrationScore"`
+	Error               string    `json:"error,omitempty"`
+}
+
+type ComparisonResult struct {
+	Summary             ComparisonSummary `json:"summary"`
+	Matched             []ComparedPage    `json:"matched"`
+	MissingInEDS        []PageResult      `json:"missingInEDS"`
+	ExtraInEDS          []PageResult      `json:"extraInEDS"`
+	SourceFetchFailures []PageResult      `json:"sourceFetchFailures"`
+	EDSFetchFailures    []PageResult      `json:"edsFetchFailures"`
+	Blocks              []BlockStat       `json:"blocks"`
+	Sections            []SectionStat     `json:"sections"`
+	Links               ComparisonLinks   `json:"links"`
+	SEO                 ComparisonSEO     `json:"seo"`
+	GeneratedAt         time.Time         `json:"generatedAt"`
+}
+
+type ComparedPage struct {
+	Path       string       `json:"path"`
+	Status     string       `json:"status"`
+	Severity   int          `json:"severity"`
+	Source     PageResult   `json:"source"`
+	EDS        PageResult   `json:"eds"`
+	FieldDiffs []FieldDiff  `json:"fieldDiffs"`
+	LinkDiffs  []FieldDiff  `json:"linkDiffs"`
+	Visuals    []VisualDiff `json:"visuals"`
+	Issues     []string     `json:"issues"`
+}
+
+type FieldDiff struct {
+	Field  string `json:"field"`
+	Source string `json:"source"`
+	EDS    string `json:"eds"`
+	Status string `json:"status"`
+}
+
+type VisualDiff struct {
+	Viewport    string  `json:"viewport"`
+	SourceImage string  `json:"sourceImage"`
+	EDSImage    string  `json:"edsImage"`
+	DiffImage   string  `json:"diffImage"`
+	DiffPercent float64 `json:"diffPercent"`
+	Status      string  `json:"status"`
+	Error       string  `json:"error,omitempty"`
+}
+
+type ComparisonLinks struct {
+	SourceTotal      int `json:"sourceTotal"`
+	EDSTotal         int `json:"edsTotal"`
+	MissingInternal  int `json:"missingInternal"`
+	AddedInternal    int `json:"addedInternal"`
+	MissingExternal  int `json:"missingExternal"`
+	AddedExternal    int `json:"addedExternal"`
+	MissingAssets    int `json:"missingAssets"`
+	AddedAssets      int `json:"addedAssets"`
+	MatchedPageDiffs int `json:"matchedPageDiffs"`
+}
+
+type ComparisonSEO struct {
+	MetadataDiffs    int `json:"metadataDiffs"`
+	TitleDiffs       int `json:"titleDiffs"`
+	H1Diffs          int `json:"h1Diffs"`
+	DescriptionDiffs int `json:"descriptionDiffs"`
+	OGDiffs          int `json:"ogDiffs"`
+}
+
 type PageResult struct {
 	URL           string        `json:"url"`
 	StatusCode    int           `json:"statusCode"`
