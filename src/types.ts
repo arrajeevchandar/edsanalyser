@@ -107,6 +107,7 @@ export interface LinkStats {
   hash: number;
   uniqueInternal: number;
   uniqueExternal: number;
+  uniqueAsset: number;
 }
 
 export interface SEOStats {

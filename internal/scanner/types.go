@@ -127,6 +127,7 @@ type LinkStats struct {
 	Hash           int `json:"hash"`
 	UniqueInternal int `json:"uniqueInternal"`
 	UniqueExternal int `json:"uniqueExternal"`
+	UniqueAsset    int `json:"uniqueAsset"`
 }
 
 type SEOStats struct {

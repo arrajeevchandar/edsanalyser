@@ -329,6 +329,7 @@ func aggregate(pages []PageResult) ([]BlockStat, []SectionStat, LinkStats, SEOSt
 	sectionPages := map[string]map[string]bool{}
 	internalUnique := map[string]bool{}
 	externalUnique := map[string]bool{}
+	assetUnique := map[string]bool{}
 	var links LinkStats
 	var seo SEOStats
 
@@ -391,6 +392,7 @@ func aggregate(pages []PageResult) ([]BlockStat, []SectionStat, LinkStats, SEOSt
 				externalUnique[link.URL] = true
 			case "asset":
 				links.Asset++
+				assetUnique[link.URL] = true
 			case "mail":
 				links.Mail++
 			case "tel":
@@ -427,6 +429,7 @@ func aggregate(pages []PageResult) ([]BlockStat, []SectionStat, LinkStats, SEOSt
 
 	links.UniqueInternal = len(internalUnique)
 	links.UniqueExternal = len(externalUnique)
+	links.UniqueAsset = len(assetUnique)
 	return blocks, sections, links, seo
 }
 

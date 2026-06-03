@@ -847,6 +847,28 @@ h3 {
 
 .blocks-workspace {
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.blocks-workspace .compact-side-panel,
+.blocks-workspace .block-detail-panel {
+  height: min(72vh, 720px);
+}
+
+.blocks-workspace .compact-side-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.blocks-workspace .select-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+
+.blocks-workspace .block-detail-panel {
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .compact-side-panel {
@@ -1170,6 +1192,40 @@ h3 {
   margin-bottom: 18px;
 }
 
+.links-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.links-distribution-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 24px;
+  align-items: center;
+}
+
+.links-distribution-body .distribution {
+  margin-bottom: 0;
+}
+
+.links-distribution-body .issue-stack.tight {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 880px) {
+  .links-distribution-body {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .links-distribution-body .issue-stack.tight {
+    grid-template-columns: 1fr;
+  }
+}
+
 .distribution-bar {
   display: flex;
   width: 100%;
@@ -1408,6 +1464,37 @@ table {
 .links-table th:nth-child(4),
 .links-table td:nth-child(4) {
   width: 28%;
+}
+
+.seo-workspace {
+  align-items: start;
+}
+
+.seo-workspace .seo-checklist,
+.seo-workspace .table-panel {
+  height: min(72vh, 720px);
+}
+
+.seo-workspace .seo-checklist {
+  display: flex;
+  flex-direction: column;
+}
+
+.seo-workspace .seo-checklist .issue-stack {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.seo-workspace .table-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.seo-workspace .table-scroll {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
 }
 
 .seo-table th:nth-child(1),
@@ -2075,6 +2162,17 @@ dd {
 
   .compact-side-panel {
     padding: 18px;
+  }
+
+  .blocks-workspace .compact-side-panel,
+  .blocks-workspace .block-detail-panel,
+  .seo-workspace .seo-checklist,
+  .seo-workspace .table-panel {
+    height: auto;
+  }
+
+  .blocks-workspace .block-detail-panel {
+    overflow-y: visible;
   }
 }
 

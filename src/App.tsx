@@ -35,7 +35,7 @@ const tabs: Array<{ id: Tab; label: string; icon: typeof Activity }> = [
   { id: 'pages', label: 'Pages', icon: FileSearch },
   { id: 'blocks', label: 'Blocks', icon: Boxes },
   { id: 'links', label: 'Links', icon: Link2 },
-  { id: 'seo', label: 'SEO / OG', icon: ShieldCheck },
+  { id: 'seo', label: 'SEO', icon: ShieldCheck },
   { id: 'history', label: 'History', icon: History },
 ];
 
@@ -816,28 +816,30 @@ function LinksView({ scan }: { scan: ScanResult }) {
         <Metric label="Broken known" value={brokenLinks.length.toString()} tone={brokenLinks.length ? 'bad' : 'good'} />
       </div>
 
-      <section className="split-workspace">
-        <div className="panel compact-side-panel">
+      <section className="links-stack">
+        <div className="panel links-distribution-panel">
           <div className="panel-heading"><h2>Distribution</h2><Link2 size={19} /></div>
-          <DistributionBar
-            items={[
-              { label: 'Internal', value: scan.links.internal, tone: 'dark' },
-              { label: 'External', value: scan.links.external, tone: 'red' },
-              { label: 'Assets', value: scan.links.asset, tone: 'light' },
-              { label: 'Mail/tel/hash', value: scan.links.mail + scan.links.tel + scan.links.hash, tone: 'soft' },
-            ]}
-          />
-          <div className="issue-stack tight">
-            <IssueItem
-              label="Unique destinations"
-              detail={`${scan.links.uniqueInternal} internal and ${scan.links.uniqueExternal} external unique URLs.`}
-              tone="muted"
+          <div className="links-distribution-body">
+            <DistributionBar
+              items={[
+                { label: 'Internal', value: scan.links.internal, tone: 'dark' },
+                { label: 'External', value: scan.links.external, tone: 'red' },
+                { label: 'Assets', value: scan.links.asset, tone: 'light' },
+                { label: 'Mail/tel/hash', value: scan.links.mail + scan.links.tel + scan.links.hash, tone: 'soft' },
+              ]}
             />
-            <IssueItem
-              label="Unlabeled anchors"
-              detail={`${unlabeledLinks.length} links have no visible anchor text.`}
-              tone={unlabeledLinks.length ? 'warn' : 'good'}
-            />
+            <div className="issue-stack tight">
+              <IssueItem
+                label="Unique destinations"
+                detail={`${scan.links.uniqueInternal} internal, ${scan.links.uniqueExternal} external, and ${scan.links.uniqueAsset} media unique URLs across all pages.`}
+                tone="muted"
+              />
+              <IssueItem
+                label="Unlabeled anchors"
+                detail={`${unlabeledLinks.length} links have no visible anchor text.`}
+                tone={unlabeledLinks.length ? 'warn' : 'good'}
+              />
+            </div>
           </div>
         </div>
         <div className="panel wide table-panel">
@@ -847,7 +849,7 @@ function LinksView({ scan }: { scan: ScanResult }) {
           </div>
           <div className="table-scroll no-x">
             <table className="fit-table links-table">
-              <thead><tr><th>Kind</th><th>Text</th><th>URL</th><th>Page</th></tr></thead>
+              <thead><tr><th>Type</th><th>Text</th><th>URL</th><th>Page</th></tr></thead>
               <tbody>
                 {allLinks.slice(0, 250).map((link, index) => (
                   <tr key={`${link.url}-${index}`}>
@@ -897,7 +899,7 @@ function SEOView({ scan }: { scan: ScanResult }) {
         <Metric label="Missing title" value={scan.seo.missingTitle.toString()} tone={scan.seo.missingTitle ? 'warn' : 'good'} />
       </div>
 
-      <section className="split-workspace">
+      <section className="split-workspace seo-workspace">
         <div className="panel seo-checklist compact-side-panel">
           <div className="panel-heading"><h2>SEO gaps</h2><ShieldCheck size={19} /></div>
           <div className="issue-stack">
@@ -1305,5 +1307,5 @@ function compactURL(raw: string) {
   }
 }
 
-const emptyLinks = { total: 0, internal: 0, external: 0, asset: 0, mail: 0, tel: 0, hash: 0, uniqueInternal: 0, uniqueExternal: 0 };
+const emptyLinks = { total: 0, internal: 0, external: 0, asset: 0, mail: 0, tel: 0, hash: 0, uniqueInternal: 0, uniqueExternal: 0, uniqueAsset: 0 };
 const emptySEO = { missingTitle: 0, missingDescription: 0, missingH1: 0, missingCanonical: 0, missingOgTitle: 0, missingOgImage: 0, missingOgUrl: 0 };

@@ -3,6 +3,7 @@ package scanner
 import (
 	"io"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -157,32 +158,148 @@ func directChildTexts(n *html.Node) []string {
 
 func extractLinks(doc *html.Node, pageBase *url.URL, root *url.URL) []LinkInfo {
 	links := []LinkInfo{}
-	walk(doc, func(n *html.Node) {
-		if !isElement(n, "a") {
-			return
+	// Asset URLs are de-duplicated on their path (ignoring the query string) so a
+	// single responsive image rendered as a <picture> with many <source> variants
+	// counts once, not once per width/format candidate.
+	assetSeen := map[string]bool{}
+
+	// resolve turns a raw reference into an absolute http(s) URL with the fragment
+	// removed, skipping inline data:/blob:/javascript: references.
+	resolve := func(raw string) (*url.URL, bool) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil, false
 		}
-		href := strings.TrimSpace(attr(n, "href"))
-		if href == "" {
-			return
+		lower := strings.ToLower(raw)
+		if strings.HasPrefix(lower, "data:") || strings.HasPrefix(lower, "blob:") || strings.HasPrefix(lower, "javascript:") {
+			return nil, false
 		}
-		parsed, err := url.Parse(href)
+		parsed, err := url.Parse(raw)
 		if err != nil {
-			return
+			return nil, false
 		}
 		resolved := pageBase.ResolveReference(parsed)
 		resolved.Fragment = ""
-		kind := classifyLink(href, resolved, root)
+		return resolved, true
+	}
+
+	// addAsset records a media file once per page, keyed on its path (query dropped),
+	// using the file name as its display name.
+	addAsset := func(raw string, resolved *url.URL, name string) {
+		clean := *resolved
+		clean.RawQuery = ""
+		key := clean.String()
+		if assetSeen[key] {
+			return
+		}
+		assetSeen[key] = true
+		if name == "" {
+			name = assetFileName(&clean)
+		}
 		links = append(links, LinkInfo{
-			Href:     href,
-			URL:      resolved.String(),
-			Text:     compactText(nodeText(n)),
-			Target:   attr(n, "target"),
-			Rel:      attr(n, "rel"),
-			Kind:     kind,
-			External: kind == "external",
+			Href: strings.TrimSpace(raw),
+			URL:  key,
+			Text: name,
+			Kind: "asset",
 		})
+	}
+
+	// considerMedia adds raw as an asset when it points at a known media file.
+	considerMedia := func(raw string) {
+		resolved, ok := resolve(raw)
+		if !ok || (resolved.Scheme != "http" && resolved.Scheme != "https") {
+			return
+		}
+		if isMediaURL(resolved) {
+			addAsset(raw, resolved, "")
+		}
+	}
+
+	walk(doc, func(n *html.Node) {
+		if n.Type != html.ElementNode {
+			return
+		}
+
+		// Anchors: navigation, plus any explicitly linked downloadable files.
+		if isElement(n, "a") {
+			href := strings.TrimSpace(attr(n, "href"))
+			if href == "" {
+				return
+			}
+			resolved, ok := resolve(href)
+			if !ok {
+				return
+			}
+			kind := classifyLink(href, resolved, root)
+			if kind == "asset" {
+				addAsset(href, resolved, "")
+				return
+			}
+			links = append(links, LinkInfo{
+				Href:     href,
+				URL:      resolved.String(),
+				Text:     compactText(nodeText(n)),
+				Target:   attr(n, "target"),
+				Rel:      attr(n, "rel"),
+				Kind:     kind,
+				External: kind == "external",
+			})
+			return
+		}
+
+		// Sweep every URL-bearing attribute on any element for media files so that
+		// images, audio, video, <source>/<link> refs, lazy-loaded data-src, and CSS
+		// background images are all captured by extension.
+		considerMedia(attr(n, "src"))
+		considerMedia(attr(n, "href"))
+		considerMedia(attr(n, "poster"))
+		considerMedia(attr(n, "data-src"))
+		for _, u := range srcsetURLs(attr(n, "srcset")) {
+			considerMedia(u)
+		}
+		for _, u := range srcsetURLs(attr(n, "data-srcset")) {
+			considerMedia(u)
+		}
+		for _, u := range cssURLs(attr(n, "style")) {
+			considerMedia(u)
+		}
 	})
+
 	return links
+}
+
+// srcsetURLs pulls the URL out of each candidate in a srcset attribute, ignoring
+// the width ("750w") or density ("2x") descriptor that follows it.
+func srcsetURLs(srcset string) []string {
+	srcset = strings.TrimSpace(srcset)
+	if srcset == "" {
+		return nil
+	}
+	urls := []string{}
+	for _, candidate := range strings.Split(srcset, ",") {
+		fields := strings.Fields(candidate)
+		if len(fields) == 0 {
+			continue
+		}
+		urls = append(urls, fields[0])
+	}
+	return urls
+}
+
+var cssURLPattern = regexp.MustCompile(`url\(\s*['"]?([^'")]+)['"]?\s*\)`)
+
+// cssURLs extracts the targets of url(...) references from an inline style value,
+// catching CSS background images and similar media.
+func cssURLs(style string) []string {
+	if strings.TrimSpace(style) == "" {
+		return nil
+	}
+	matches := cssURLPattern.FindAllStringSubmatch(style, -1)
+	urls := make([]string, 0, len(matches))
+	for _, match := range matches {
+		urls = append(urls, strings.TrimSpace(match[1]))
+	}
+	return urls
 }
 
 func firstMeta(doc *html.Node, keyAttr, keyValue string) string {

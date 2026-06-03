@@ -96,6 +96,73 @@ func TestAnalyzeHTMLExtractsEDSSEOAndLinks(t *testing.T) {
 	}
 }
 
+func TestAnalyzeHTMLExtractsRenderedMediaAsAssets(t *testing.T) {
+	root, _ := url.Parse("https://example.com/")
+	html := `
+<!doctype html>
+<html lang="en">
+  <body>
+    <main>
+      <picture>
+        <source type="image/webp" srcset="./media_hero.png?width=750&format=webply 750w, ./media_hero.png?width=2000&format=webply 2000w" />
+        <img src="./media_hero.png?width=750&format=png" alt="Hero banner" />
+      </picture>
+      <img src="/assets/logo.svg" alt="Logo" />
+      <video src="/media/clip.mp4" poster="/media/poster.jpg"></video>
+      <audio src="/media/song.mp3"></audio>
+      <div style="background-image: url('/media/backdrop.webp')"></div>
+      <img data-src="/lazy/photo.jpeg" />
+      <img src="data:image/gif;base64,R0lGODlh" alt="inline" />
+      <a href="/files/brochure.pdf">Download</a>
+    </main>
+  </body>
+</html>`
+	page, err := AnalyzeHTML("https://example.com/", strings.NewReader(html), root)
+	if err != nil {
+		t.Fatalf("AnalyzeHTML returned error: %v", err)
+	}
+
+	assets := map[string]bool{}
+	assetText := map[string]string{}
+	for _, link := range page.Links {
+		if link.Kind == "asset" {
+			assets[link.URL] = true
+			assetText[link.URL] = link.Text
+		}
+	}
+
+	// Each media file is named by its file name.
+	if got := assetText["https://example.com/media_hero.png"]; got != "media_hero.png" {
+		t.Fatalf("expected hero asset name to be its file name, got %q", got)
+	}
+
+	// All media (images, audio, video, css background, lazy data-src, linked file)
+	// must be captured by extension, and the responsive <picture> must collapse to
+	// a single hero asset.
+	want := []string{
+		"https://example.com/media_hero.png",
+		"https://example.com/assets/logo.svg",
+		"https://example.com/media/clip.mp4",
+		"https://example.com/media/poster.jpg",
+		"https://example.com/media/song.mp3",
+		"https://example.com/media/backdrop.webp",
+		"https://example.com/lazy/photo.jpeg",
+		"https://example.com/files/brochure.pdf",
+	}
+	for _, url := range want {
+		if !assets[url] {
+			t.Fatalf("expected asset %q in %+v", url, assets)
+		}
+	}
+	if len(assets) != len(want) {
+		t.Fatalf("expected %d unique assets, got %d: %+v", len(want), len(assets), assets)
+	}
+	// data: URIs are not real downloadable assets and must be ignored.
+	if assets["data:image/gif;base64,R0lGODlh"] {
+		t.Fatal("data: URI should not be counted as an asset")
+	}
+}
+
 func TestAnalyzeHTMLResolvesRelativeLinksAgainstCurrentPage(t *testing.T) {
 	root, _ := url.Parse("https://example.com/")
 	page, err := AnalyzeHTML("https://example.com/docs/index", strings.NewReader(`<a href="child">Child</a>`), root)

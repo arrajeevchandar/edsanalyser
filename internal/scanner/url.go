@@ -85,6 +85,39 @@ func isExcludedAssetURL(u *url.URL) bool {
 	return excludedExtensions[ext]
 }
 
+// mediaExtensions is the set of file extensions treated as media assets when the
+// page source is swept for images, audio, and video files.
+var mediaExtensions = map[string]bool{
+	// images
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".svg": true, ".webp": true,
+	".avif": true, ".bmp": true, ".ico": true, ".tif": true, ".tiff": true, ".heic": true,
+	".heif": true, ".jfif": true, ".apng": true,
+	// video
+	".mp4": true, ".webm": true, ".mov": true, ".avi": true, ".mkv": true, ".ogv": true,
+	".m4v": true, ".mpg": true, ".mpeg": true, ".wmv": true, ".flv": true, ".3gp": true,
+	// audio
+	".mp3": true, ".wav": true, ".ogg": true, ".oga": true, ".aac": true, ".flac": true,
+	".m4a": true, ".weba": true, ".opus": true, ".wma": true, ".mid": true, ".midi": true,
+}
+
+// isMediaURL reports whether the URL path ends in a known media extension.
+func isMediaURL(u *url.URL) bool {
+	return mediaExtensions[strings.ToLower(path.Ext(u.Path))]
+}
+
+// assetFileName returns the (URL-decoded) file name of a media URL, e.g.
+// "/media_1ab2.jpg" -> "media_1ab2.jpg".
+func assetFileName(u *url.URL) string {
+	base := path.Base(u.Path)
+	if base == "." || base == "/" || base == "" {
+		return ""
+	}
+	if decoded, err := url.PathUnescape(base); err == nil {
+		base = decoded
+	}
+	return base
+}
+
 func classifyLink(raw string, resolved *url.URL, base *url.URL) string {
 	lower := strings.ToLower(strings.TrimSpace(raw))
 	switch {
