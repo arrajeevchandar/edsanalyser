@@ -157,11 +157,10 @@ The repository includes `Dockerfile` and `render.yaml` for the Go backend, plus
    https://YOUR-SERVICE.onrender.com/api/health
    ```
 
-The blueprint attaches a persistent disk at `/app/.data` so SQLite scan history
-and visual-diff files survive restarts. Render persistent disks require a paid
-web service. For a temporary free deployment, remove the `disk` block from
-`render.yaml` and set `EDS_ANALYSER_DB` to `/tmp/eds-analyser.sqlite`; history
-will then be lost whenever the service restarts or redeploys.
+The blueprint uses Render's free web-service plan. Its filesystem is ephemeral,
+so SQLite scan history and visual-diff files are lost whenever the service
+restarts or redeploys. To preserve them, upgrade the Render service and attach
+a persistent disk at `/app/.data`.
 
 ### Frontend on Vercel
 

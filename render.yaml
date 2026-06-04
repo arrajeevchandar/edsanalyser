@@ -2,12 +2,9 @@ services:
   - type: web
     name: eds-analyser-api
     runtime: docker
+    plan: free
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
     envVars:
       - key: EDS_ANALYSER_DB
         value: /app/.data/eds-analyser.sqlite
-    disk:
-      name: eds-analyser-data
-      mountPath: /app/.data
-      sizeGB: 1
