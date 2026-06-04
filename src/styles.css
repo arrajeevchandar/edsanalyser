@@ -773,6 +773,14 @@ h3 {
   padding: 4px 2px 0;
 }
 
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .section-toolbar h2 {
   margin: 4px 0 0;
   font-size: 1.5rem;
@@ -1682,6 +1690,51 @@ tbody tr.selected td {
   color: var(--ink-500);
   font-size: 0.84rem;
   overflow-wrap: anywhere;
+}
+
+.inspector-head small {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-400);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.candidate-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--surface-2);
+}
+
+.candidate-list {
+  display: grid;
+  gap: 8px;
+}
+
+.candidate-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.candidate-row strong,
+.candidate-row span,
+.candidate-row small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.candidate-row span,
+.candidate-row small {
+  color: var(--ink-500);
+  font-size: 0.78rem;
 }
 
 .inspector-status {

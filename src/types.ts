@@ -82,6 +82,7 @@ export interface PageResult {
   auditStatus: 'pending' | 'running' | 'complete' | 'failed' | string;
   auditError?: string;
   fetchError?: string;
+  matchCandidates: MatchCandidate[];
 }
 
 export interface BlockStat {
@@ -138,10 +139,15 @@ export interface ComparisonSummary {
   edsRootUrl: string;
   status: string;
   phase: string;
+  fastReady: boolean;
+  backgroundPhase: string;
   startedAt: string;
   finishedAt?: string;
   sourcePages: number;
   edsPages: number;
+  sourceAnalyzed: number;
+  edsAnalyzed: number;
+  matchesUpdatedAt?: string;
   matchedPages: number;
   uncertainMatches: number;
   missingInEDS: number;
@@ -190,6 +196,15 @@ export interface FieldDiff {
   status: string;
 }
 
+export interface MatchCandidate {
+  url: string;
+  path: string;
+  title: string;
+  h1: string;
+  score: number;
+  reason: string;
+}
+
 export interface VisualDiff {
   viewport: string;
   sourceImage: string;
@@ -206,6 +221,7 @@ export interface ComparedPage {
   severity: number;
   matchType: string;
   matchConfidence: string;
+  matchReason: string;
   sourceAliases: string[];
   edsAliases: string[];
   source: PageResult;

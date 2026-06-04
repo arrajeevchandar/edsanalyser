@@ -123,6 +123,42 @@ describe('App', () => {
     expect(await screen.findByText('EDS page missing.')).toBeInTheDocument();
   });
 
+  it('accepts a suggested comparison match from a missing page', async () => {
+    const summary = comparisonSummary('cmp-candidate');
+    const result = comparisonResult(summary);
+    mockHistories([], [summary]);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(result))
+      .mockResolvedValueOnce(jsonResponse({ ...result, matched: [...result.matched, {
+        ...result.matched[0],
+        path: '/missing',
+        source: result.missingInEDS[0],
+        eds: result.extraInEDS[0],
+        matchType: 'manual',
+        matchConfidence: 'high',
+        matchReason: 'Matched manually by user override.',
+      }], missingInEDS: [], extraInEDS: [] }))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([summary]));
+
+    render(<App />);
+    await userEvent.click(await screen.findByText(/legacy\.example\.com to eds\.example\.com/));
+    await userEvent.click(screen.getByRole('button', { name: 'Pages' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Missing' }));
+    expect(await screen.findByText('Suggested matches')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Accept' }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/comparisons/cmp-candidate/matches',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ sourceUrl: 'https://legacy.example.com/missing', edsUrl: 'https://eds.example.com/extra', action: 'match' }),
+        }),
+      ),
+    );
+  });
+
   it('runs Lighthouse for all pages from the overview button', async () => {
     const summary = scanSummary('scan-audit');
     const result = scanResult(summary);
@@ -288,7 +324,9 @@ function comparisonResult(summary: ReturnType<typeof comparisonSummary>) {
       visuals: [],
       issues: ['Matched by canonical alias; verify this page pair.'],
     }],
-    missingInEDS: [pageResult('https://legacy.example.com/missing')],
+    missingInEDS: [pageResult('https://legacy.example.com/missing', {
+      matchCandidates: [{ url: 'https://eds.example.com/extra', path: '/extra', title: 'Home', h1: 'Home', score: 82, reason: 'same title' }],
+    })],
     extraInEDS: [pageResult('https://eds.example.com/extra')],
     sourceFetchFailures: [pageResult('https://legacy.example.com/broken', { fetchError: 'HTTP 500', statusCode: 500 })],
     edsFetchFailures: [],
@@ -340,6 +378,7 @@ function pageResult(url: string, overrides: Record<string, unknown> = {}) {
     externalLinks: 0,
     lighthouse: { performance: null, accessibility: null, bestPractices: null, seo: null, health: null },
     auditStatus: 'pending',
+    matchCandidates: [],
     ...overrides,
   };
 }

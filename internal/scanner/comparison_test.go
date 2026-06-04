@@ -50,16 +50,50 @@ func TestBuildComparisonPagesGroupsMatchedMissingAndExtra(t *testing.T) {
 	}
 }
 
-func TestBuildComparisonPagesMatchesCanonicalAliasesAsUncertain(t *testing.T) {
+func TestBuildComparisonPagesMatchesCanonicalAliasesAsHighConfidence(t *testing.T) {
 	source := []PageResult{{URL: "https://legacy.example.com/products/shoe", Title: "Shoe"}}
 	eds := []PageResult{{URL: "https://main--site--org.aem.live/shoe", Canonical: "https://main--site--org.aem.live/products/shoe", Title: "Shoe"}}
 	groups := buildComparisonPages(source, eds)
+	if len(groups.Matched) != 1 {
+		t.Fatalf("expected one canonical match, got %+v", groups)
+	}
+	match := groups.Matched[0]
+	if match.MatchType != "canonical" || match.MatchConfidence != "high" || match.Path != "/products/shoe" {
+		t.Fatalf("unexpected alias match metadata: %+v", match)
+	}
+}
+
+func TestBuildComparisonPagesMatchesPathCleanupAsUncertain(t *testing.T) {
+	source := []PageResult{{URL: "https://legacy.example.com/en/about.html", Title: "About"}}
+	eds := []PageResult{{URL: "https://main--site--org.aem.live/about", Title: "About"}}
+	groups := buildComparisonPages(source, eds)
 	if len(groups.UncertainMatches) != 1 {
-		t.Fatalf("expected one uncertain alias match, got %+v", groups)
+		t.Fatalf("expected one path-cleanup match, got %+v", groups)
 	}
 	match := groups.UncertainMatches[0]
-	if match.MatchType != "canonical" || match.MatchConfidence != "medium" || match.Path != "/products/shoe" {
-		t.Fatalf("unexpected alias match metadata: %+v", match)
+	if match.MatchConfidence != "medium" || match.Path != "/about" {
+		t.Fatalf("unexpected path-cleanup metadata: %+v", match)
+	}
+}
+
+func TestBuildComparisonPagesSuggestsWeakCandidates(t *testing.T) {
+	source := []PageResult{{URL: "https://legacy.example.com/footwear/running-shoe", Title: "Running Shoe", H1: "Running Shoe"}}
+	eds := []PageResult{{URL: "https://main--site--org.aem.live/products/running-shoe-new", Title: "Running Shoe", H1: "Running Shoe"}}
+	groups := buildComparisonPages(source, eds)
+	if len(groups.MissingInEDS) != 1 || len(groups.MissingInEDS[0].MatchCandidates) == 0 {
+		t.Fatalf("expected candidate suggestion for missing page, got %+v", groups.MissingInEDS)
+	}
+	if groups.MissingInEDS[0].MatchCandidates[0].URL != eds[0].URL {
+		t.Fatalf("unexpected candidate: %+v", groups.MissingInEDS[0].MatchCandidates)
+	}
+}
+
+func TestBuildComparisonPagesAppliesManualOverride(t *testing.T) {
+	source := []PageResult{{URL: "https://legacy.example.com/old-path", Title: "Legacy"}}
+	eds := []PageResult{{URL: "https://main--site--org.aem.live/new-path", Title: "EDS"}}
+	groups := buildComparisonPagesWithOverrides(source, eds, []MatchOverride{{SourceURL: source[0].URL, EDSURL: eds[0].URL, Action: "match"}})
+	if len(groups.Matched) != 1 || groups.Matched[0].MatchType != "manual" {
+		t.Fatalf("expected manual match, got %+v", groups)
 	}
 }
 
@@ -224,8 +258,73 @@ func TestComparisonCrawlsSameOriginLinksBeyondHome(t *testing.T) {
 	if result.Summary.ExtraInEDS != 1 || len(result.ExtraInEDS) != 1 {
 		t.Fatalf("expected one EDS-only page, got summary=%+v extra=%+v", result.Summary, result.ExtraInEDS)
 	}
+	if result.Summary.VisualQueued != 2 || result.Summary.VisualCompleted != 2 {
+		t.Fatalf("default comparison should run visual diff only for homepage desktop/mobile, got %+v", result.Summary)
+	}
 	if result.Discovery.Source.FromStaticLinks < 3 || result.Discovery.EDS.FromStaticLinks < 4 {
 		t.Fatalf("expected static link discovery to expand both sites, got %+v", result.Discovery)
+	}
+}
+
+func TestUpdateComparisonMatchPersistsManualOverride(t *testing.T) {
+	sourceMux := http.NewServeMux()
+	sourceServer := httptest.NewServer(sourceMux)
+	defer sourceServer.Close()
+	sourceMux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `<urlset><url><loc>%s/</loc></url><url><loc>%s/old-path</loc></url></urlset>`, sourceServer.URL, sourceServer.URL)
+	})
+	sourceMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/old-path" {
+			fmt.Fprint(w, pageHTML("Legacy Product", "/"))
+			return
+		}
+		fmt.Fprint(w, pageHTML("Legacy Home", "/old-path"))
+	})
+
+	edsMux := http.NewServeMux()
+	edsServer := httptest.NewServer(edsMux)
+	defer edsServer.Close()
+	edsMux.HandleFunc("/scripts/aem.js", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		fmt.Fprint(w, "export default function decorate(){}")
+	})
+	edsMux.HandleFunc("/sitemap.xml", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `<urlset><url><loc>%s/</loc></url><url><loc>%s/new-path</loc></url></urlset>`, edsServer.URL, edsServer.URL)
+	})
+	edsMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/new-path" {
+			fmt.Fprint(w, pageHTML("Migrated Product", "/"))
+			return
+		}
+		fmt.Fprint(w, pageHTML("Migrated Home", "/new-path"))
+	})
+
+	store := openTestStore(t)
+	defer store.Close()
+	service := NewService(store, ServiceOptions{
+		HTTPClient: &http.Client{Timeout: 2 * time.Second},
+		Lighthouse: NoopLighthouseRunner{},
+		Visual:     fakeVisualRunner{},
+		Rendered:   fakeRenderedLinkExtractor{},
+		Workers:    2,
+	})
+
+	opts := DefaultComparisonOptions()
+	opts.LighthouseMode = "none"
+	comparison, err := service.StartComparison(context.Background(), sourceServer.URL, edsServer.URL, opts)
+	if err != nil {
+		t.Fatalf("StartComparison returned error: %v", err)
+	}
+	result := waitForComparison(t, service, comparison.ID, "completed")
+	if result.Summary.MissingInEDS != 1 || result.Summary.ExtraInEDS != 1 {
+		t.Fatalf("expected one missing and one extra before override, got %+v", result.Summary)
+	}
+	updated, err := service.UpdateComparisonMatch(comparison.ID, MatchOverride{SourceURL: sourceServer.URL + "/old-path", EDSURL: edsServer.URL + "/new-path", Action: "match"})
+	if err != nil {
+		t.Fatalf("UpdateComparisonMatch returned error: %v", err)
+	}
+	if updated.Summary.MissingInEDS != 0 || updated.Summary.ExtraInEDS != 0 || updated.Summary.MatchedPages != 2 {
+		t.Fatalf("manual override did not recompute groups: %+v", updated.Summary)
 	}
 }
 

@@ -55,10 +55,15 @@ type ComparisonSummary struct {
 	EDSRootURL          string          `json:"edsRootUrl"`
 	Status              string          `json:"status"`
 	Phase               string          `json:"phase"`
+	FastReady           bool            `json:"fastReady"`
+	BackgroundPhase     string          `json:"backgroundPhase"`
 	StartedAt           time.Time       `json:"startedAt"`
 	FinishedAt          time.Time       `json:"finishedAt,omitempty"`
 	SourcePages         int             `json:"sourcePages"`
 	EDSPages            int             `json:"edsPages"`
+	SourceAnalyzed      int             `json:"sourceAnalyzed"`
+	EDSAnalyzed         int             `json:"edsAnalyzed"`
+	MatchesUpdatedAt    time.Time       `json:"matchesUpdatedAt,omitempty"`
 	MatchedPages        int             `json:"matchedPages"`
 	UncertainMatches    int             `json:"uncertainMatches"`
 	MissingInEDS        int             `json:"missingInEDS"`
@@ -103,6 +108,7 @@ type ComparedPage struct {
 	Severity        int          `json:"severity"`
 	MatchType       string       `json:"matchType"`
 	MatchConfidence string       `json:"matchConfidence"`
+	MatchReason     string       `json:"matchReason"`
 	SourceAliases   []string     `json:"sourceAliases"`
 	EDSAliases      []string     `json:"edsAliases"`
 	Source          PageResult   `json:"source"`
@@ -111,6 +117,21 @@ type ComparedPage struct {
 	LinkDiffs       []FieldDiff  `json:"linkDiffs"`
 	Visuals         []VisualDiff `json:"visuals"`
 	Issues          []string     `json:"issues"`
+}
+
+type MatchCandidate struct {
+	URL    string `json:"url"`
+	Path   string `json:"path"`
+	Title  string `json:"title"`
+	H1     string `json:"h1"`
+	Score  int    `json:"score"`
+	Reason string `json:"reason"`
+}
+
+type MatchOverride struct {
+	SourceURL string `json:"sourceUrl"`
+	EDSURL    string `json:"edsUrl"`
+	Action    string `json:"action"`
 }
 
 type ComparisonDiscovery struct {
@@ -172,29 +193,30 @@ type ComparisonSEO struct {
 }
 
 type PageResult struct {
-	RequestedURL  string        `json:"requestedUrl,omitempty"`
-	URL           string        `json:"url"`
-	StatusCode    int           `json:"statusCode"`
-	Title         string        `json:"title"`
-	H1            string        `json:"h1"`
-	Canonical     string        `json:"canonical"`
-	Description   string        `json:"description"`
-	Robots        string        `json:"robots"`
-	Lang          string        `json:"lang"`
-	OG            OpenGraph     `json:"og"`
-	Links         []LinkInfo    `json:"links"`
-	Blocks        []BlockInfo   `json:"blocks"`
-	Sections      []SectionInfo `json:"sections"`
-	BlockCount    int           `json:"blockCount"`
-	SectionCount  int           `json:"sectionCount"`
-	LinkCount     int           `json:"linkCount"`
-	InternalLinks int           `json:"internalLinks"`
-	ExternalLinks int           `json:"externalLinks"`
-	ScriptCount   int           `json:"scriptCount,omitempty"`
-	Lighthouse    ScoreSet      `json:"lighthouse"`
-	AuditStatus   string        `json:"auditStatus"`
-	AuditError    string        `json:"auditError,omitempty"`
-	FetchError    string        `json:"fetchError,omitempty"`
+	RequestedURL    string           `json:"requestedUrl,omitempty"`
+	URL             string           `json:"url"`
+	StatusCode      int              `json:"statusCode"`
+	Title           string           `json:"title"`
+	H1              string           `json:"h1"`
+	Canonical       string           `json:"canonical"`
+	Description     string           `json:"description"`
+	Robots          string           `json:"robots"`
+	Lang            string           `json:"lang"`
+	OG              OpenGraph        `json:"og"`
+	Links           []LinkInfo       `json:"links"`
+	Blocks          []BlockInfo      `json:"blocks"`
+	Sections        []SectionInfo    `json:"sections"`
+	BlockCount      int              `json:"blockCount"`
+	SectionCount    int              `json:"sectionCount"`
+	LinkCount       int              `json:"linkCount"`
+	InternalLinks   int              `json:"internalLinks"`
+	ExternalLinks   int              `json:"externalLinks"`
+	ScriptCount     int              `json:"scriptCount,omitempty"`
+	Lighthouse      ScoreSet         `json:"lighthouse"`
+	AuditStatus     string           `json:"auditStatus"`
+	AuditError      string           `json:"auditError,omitempty"`
+	FetchError      string           `json:"fetchError,omitempty"`
+	MatchCandidates []MatchCandidate `json:"matchCandidates"`
 }
 
 type OpenGraph struct {

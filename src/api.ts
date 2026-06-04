@@ -66,6 +66,20 @@ export function cancelComparison(id: string): Promise<{ status: string }> {
   return request<{ status: string }>(`/api/comparisons/${id}/cancel`, { method: 'POST' });
 }
 
+export function updateComparisonMatch(id: string, sourceUrl: string, edsUrl: string, action: 'match' | 'unmatch'): Promise<ComparisonResult> {
+  return request<ComparisonResult>(`/api/comparisons/${id}/matches`, {
+    method: 'POST',
+    body: JSON.stringify({ sourceUrl, edsUrl, action }),
+  }).then(normalizeComparisonResult);
+}
+
+export function runComparisonVisuals(id: string, pageKeys: string[] = []): Promise<ComparisonSummary> {
+  return request<ComparisonSummary>(`/api/comparisons/${id}/visuals`, {
+    method: 'POST',
+    body: JSON.stringify({ pageKeys }),
+  }).then(normalizeComparisonSummary);
+}
+
 function normalizeScanResult(result: ScanResult): ScanResult {
   const pages = (result.pages || []).map(normalizePage);
   return {
@@ -142,8 +156,12 @@ function normalizeComparisonSummary(summary: ComparisonSummary): ComparisonSumma
   return {
     ...summary,
     phase: summary.phase || summary.status || 'idle',
+    fastReady: summary.fastReady ?? false,
+    backgroundPhase: summary.backgroundPhase || '',
     sourcePages: summary.sourcePages ?? 0,
     edsPages: summary.edsPages ?? 0,
+    sourceAnalyzed: summary.sourceAnalyzed ?? summary.sourcePages ?? 0,
+    edsAnalyzed: summary.edsAnalyzed ?? summary.edsPages ?? 0,
     matchedPages: summary.matchedPages ?? 0,
     uncertainMatches: summary.uncertainMatches ?? 0,
     missingInEDS: summary.missingInEDS ?? 0,
@@ -171,6 +189,7 @@ function normalizeComparedPage(page: ComparedPage): ComparedPage {
     eds: normalizePage(page.eds || ({} as PageResult)),
     matchType: page.matchType || 'exact',
     matchConfidence: page.matchConfidence || 'high',
+    matchReason: page.matchReason || page.matchType || 'exact',
     sourceAliases: page.sourceAliases || [],
     edsAliases: page.edsAliases || [],
     fieldDiffs: page.fieldDiffs || [],
@@ -214,5 +233,6 @@ function normalizePage(page: PageResult): PageResult {
     })),
     lighthouse,
     auditStatus,
+    matchCandidates: page.matchCandidates || [],
   };
 }

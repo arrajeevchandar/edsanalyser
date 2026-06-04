@@ -45,7 +45,7 @@ func NewChromeVisualRunner() ChromeVisualRunner {
 }
 
 func (r ChromeVisualRunner) Diff(ctx context.Context, comparisonID string, pageKey string, sourceURL string, edsURL string, viewport VisualViewport) VisualDiff {
-	visual := VisualDiff{Viewport: viewport.Name, Status: "failed"}
+	visual := VisualDiff{Viewport: viewport.Name, Status: "error"}
 	if r.OutputDir == "" {
 		r.OutputDir = DefaultVisualDiffDir
 	}

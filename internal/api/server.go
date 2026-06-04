@@ -235,6 +235,39 @@ func (s *Server) comparisonByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "matches" && r.Method == http.MethodPost {
+		var body struct {
+			SourceURL string `json:"sourceUrl"`
+			EDSURL    string `json:"edsUrl"`
+			Action    string `json:"action"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		result, err := s.service.UpdateComparisonMatch(id, scanner.MatchOverride{SourceURL: body.SourceURL, EDSURL: body.EDSURL, Action: body.Action})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "visuals" && r.Method == http.MethodPost {
+		var body struct {
+			PageKeys []string `json:"pageKeys"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		summary, err := s.service.RunComparisonVisuals(r.Context(), id, body.PageKeys)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
+		return
+	}
+
 	if len(parts) == 3 && parts[1] == "visuals" && r.Method == http.MethodGet {
 		s.comparisonVisual(w, r, id, parts[2])
 		return

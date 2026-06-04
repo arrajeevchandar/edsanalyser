@@ -101,6 +101,9 @@ func NormalizeComparedPage(page ComparedPage) ComparedPage {
 	if page.MatchConfidence == "" {
 		page.MatchConfidence = "high"
 	}
+	if page.MatchReason == "" {
+		page.MatchReason = page.MatchType
+	}
 	if page.SourceAliases == nil {
 		page.SourceAliases = []string{}
 	}
@@ -144,6 +147,9 @@ func NormalizePage(page PageResult) PageResult {
 	}
 	if page.Sections == nil {
 		page.Sections = []SectionInfo{}
+	}
+	if page.MatchCandidates == nil {
+		page.MatchCandidates = []MatchCandidate{}
 	}
 	if page.AuditStatus == "" {
 		switch {
