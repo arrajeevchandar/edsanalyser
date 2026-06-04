@@ -1,7 +1,16 @@
 import type { ComparedPage, ComparisonResult, ComparisonSummary, PageResult, ScanResult, ScanSummary } from './types';
 
+const apiBaseUrl = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+
+export function apiUrl(path: string): string {
+  if (!path || /^https?:\/\//i.test(path)) {
+    return path;
+  }
+  return `${apiBaseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
+  const response = await fetch(apiUrl(url), {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   });
@@ -194,7 +203,12 @@ function normalizeComparedPage(page: ComparedPage): ComparedPage {
     edsAliases: page.edsAliases || [],
     fieldDiffs: page.fieldDiffs || [],
     linkDiffs: page.linkDiffs || [],
-    visuals: page.visuals || [],
+    visuals: (page.visuals || []).map((visual) => ({
+      ...visual,
+      sourceImage: apiUrl(visual.sourceImage),
+      edsImage: apiUrl(visual.edsImage),
+      diffImage: apiUrl(visual.diffImage),
+    })),
     issues: page.issues || [],
     status: page.status || 'pass',
   };

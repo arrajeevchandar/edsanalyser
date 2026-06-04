@@ -134,7 +134,49 @@ npm run dev             # http://localhost:5173  (proxies /api → :8787)
 | Env var            | Default                          | Purpose                          |
 |--------------------|----------------------------------|----------------------------------|
 | `ADDR`             | `:8787`                          | Server listen address            |
+| `PORT`             | `8787`                           | Server port when `ADDR` is unset |
 | `EDS_ANALYSER_DB`  | `.data/eds-analyser.sqlite`      | SQLite database path             |
+| `VITE_API_URL`     | same origin                      | Backend URL baked into the frontend build |
+
+---
+
+## Deploying
+
+The repository includes `Dockerfile` and `render.yaml` for the Go backend, plus
+`vercel.json` for the Vite frontend.
+
+### Backend on Render
+
+1. Push the repository to GitHub.
+2. In Render, choose **New > Blueprint** and connect the repository.
+3. Render reads `render.yaml`, builds the Docker image, and exposes the backend
+   as a web service. The image includes Node, Lighthouse, and Chromium.
+4. After deployment, verify:
+
+   ```text
+   https://YOUR-SERVICE.onrender.com/api/health
+   ```
+
+The blueprint attaches a persistent disk at `/app/.data` so SQLite scan history
+and visual-diff files survive restarts. Render persistent disks require a paid
+web service. For a temporary free deployment, remove the `disk` block from
+`render.yaml` and set `EDS_ANALYSER_DB` to `/tmp/eds-analyser.sqlite`; history
+will then be lost whenever the service restarts or redeploys.
+
+### Frontend on Vercel
+
+1. In Vercel, import the same GitHub repository as a new project.
+2. Keep the root directory as the repository root. Vercel will use:
+   - Build command: `npm run build`
+   - Output directory: `dist`
+3. Add this environment variable for Production and Preview:
+
+   ```text
+   VITE_API_URL=https://YOUR-SERVICE.onrender.com
+   ```
+
+4. Deploy the project. If `VITE_API_URL` changes later, redeploy the frontend
+   because Vite embeds it at build time.
 
 ---
 

@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	addr := env("ADDR", ":8787")
+	addr := env("ADDR", ":"+env("PORT", "8787"))
 	dbPath := env("EDS_ANALYSER_DB", filepath.Join(".data", "eds-analyser.sqlite"))
 
 	store, err := scanner.OpenSQLiteStore(dbPath)

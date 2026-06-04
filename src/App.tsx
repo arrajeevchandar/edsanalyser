@@ -29,6 +29,7 @@ import {
 import {
   cancelComparison,
   cancelScan,
+  apiUrl,
   checkEds,
   getComparison,
   getScan,
@@ -144,7 +145,7 @@ export default function App() {
     if (!activeScan || activeScan.status !== 'running') {
       return undefined;
     }
-    const source = new EventSource(`/api/scans/${activeScan.id}/events`);
+    const source = new EventSource(apiUrl(`/api/scans/${activeScan.id}/events`));
     const eventNames = [
       'start',
       'discovered',
@@ -183,7 +184,7 @@ export default function App() {
     if (!activeComparison || activeComparison.status !== 'running') {
       return undefined;
     }
-    const source = new EventSource(`/api/comparisons/${activeComparison.id}/events`);
+    const source = new EventSource(apiUrl(`/api/comparisons/${activeComparison.id}/events`));
     const eventNames = [
       'start',
       'source-discovered',
