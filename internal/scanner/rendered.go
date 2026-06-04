@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -29,11 +30,23 @@ func (r ChromeRenderedLinkExtractor) Links(ctx context.Context, pageURL string, 
 	}
 	renderCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
+	// Dedicated throwaway profile so headless does not hand off to an already
+	// running Chrome (which would return the wrong DOM or hang on the lock).
+	profile, err := os.MkdirTemp("", "eds-dom-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(profile)
 	cmd := exec.CommandContext(renderCtx, chrome,
 		"--headless=new",
 		"--disable-gpu",
 		"--hide-scrollbars",
 		"--no-sandbox",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-extensions",
+		"--disable-dev-shm-usage",
+		"--user-data-dir="+profile,
 		"--virtual-time-budget=5000",
 		"--dump-dom",
 		pageURL,

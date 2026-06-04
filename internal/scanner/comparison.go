@@ -104,11 +104,21 @@ func (s *Service) GetComparison(id string) (ComparisonResult, error) {
 func (s *Service) CancelComparison(id string) error {
 	s.mu.Lock()
 	cancel := s.cancels[id]
+	visualCancel := s.cancels[id+"-visual"]
+	lighthouseCancel := s.cancels[id+"-lighthouse"]
 	s.mu.Unlock()
-	if cancel == nil {
+	if cancel == nil && visualCancel == nil && lighthouseCancel == nil {
 		return fmt.Errorf("comparison is not running")
 	}
-	cancel()
+	if cancel != nil {
+		cancel()
+	}
+	if visualCancel != nil {
+		visualCancel()
+	}
+	if lighthouseCancel != nil {
+		lighthouseCancel()
+	}
 	s.publish(Event{Type: "cancel", ScanID: id, Message: "Comparison cancellation requested"})
 	return nil
 }
@@ -192,6 +202,112 @@ func (s *Service) RunComparisonVisuals(parent context.Context, id string, pageKe
 		cancel()
 	}()
 	return summary, parent.Err()
+}
+
+// RunComparisonLighthouse audits selected matched pages on demand. sides
+// controls which columns are refreshed ("source"/"legacy", "eds", or empty for
+// both). It runs in the background and streams progress, so it works even after
+// the comparison itself has completed.
+func (s *Service) RunComparisonLighthouse(parent context.Context, id string, pageKeys []string, sides []string) (ComparisonSummary, error) {
+	result, err := s.store.GetComparison(id)
+	if err != nil {
+		return ComparisonSummary{}, err
+	}
+	targets := comparisonTargetsByKey(result, pageKeys)
+	summary := result.Summary
+	if len(targets) == 0 {
+		return summary, nil
+	}
+	doSource, doEDS := lighthouseSides(sides)
+	queued := 0
+	for _, page := range targets {
+		if doSource && page.Source.URL != "" && page.Source.FetchError == "" {
+			queued++
+		}
+		if doEDS && page.EDS.URL != "" && page.EDS.FetchError == "" {
+			queued++
+		}
+	}
+	if queued == 0 {
+		return summary, nil
+	}
+
+	summary.BackgroundPhase = "lighthouse"
+	summary.Phase = "lighthouse"
+	summary.LighthouseQueued = queued
+	summary.LighthouseCompleted = 0
+	summary.LighthouseFailed = 0
+	_ = s.store.UpdateComparison(summary)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.cancels[id+"-lighthouse"] = cancel
+	s.mu.Unlock()
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.cancels, id+"-lighthouse")
+			s.mu.Unlock()
+		}()
+		updated := summary
+		for i := range targets {
+			if ctx.Err() != nil {
+				break
+			}
+			page := targets[i]
+			if doSource && page.Source.URL != "" && page.Source.FetchError == "" {
+				audited := s.auditPageWithLighthouse(ctx, page.Source)
+				page.Source = audited
+				if audited.AuditStatus == "failed" {
+					updated.LighthouseFailed++
+				} else {
+					updated.LighthouseCompleted++
+				}
+				s.publish(Event{Type: "comparison-audit-complete", ScanID: id, PageURL: audited.URL, Data: audited})
+			}
+			if ctx.Err() != nil {
+				break
+			}
+			if doEDS && page.EDS.URL != "" && page.EDS.FetchError == "" {
+				audited := s.auditPageWithLighthouse(ctx, page.EDS)
+				page.EDS = audited
+				if audited.AuditStatus == "failed" {
+					updated.LighthouseFailed++
+				} else {
+					updated.LighthouseCompleted++
+				}
+				s.publish(Event{Type: "comparison-audit-complete", ScanID: id, PageURL: audited.URL, Data: audited})
+			}
+			_ = s.store.SaveComparedPage(id, comparedPageGroup(page), page)
+			_ = s.store.UpdateComparison(updated)
+		}
+		updated.BackgroundPhase = ""
+		if updated.Status != "running" {
+			updated.Phase = updated.Status
+		}
+		_ = s.store.UpdateComparison(updated)
+		s.publish(Event{Type: "lighthouse-run-complete", ScanID: id, Message: "Lighthouse run complete", Data: updated})
+		cancel()
+	}()
+	return summary, parent.Err()
+}
+
+func lighthouseSides(sides []string) (bool, bool) {
+	if len(sides) == 0 {
+		return true, true
+	}
+	doSource, doEDS := false, false
+	for _, side := range sides {
+		switch strings.ToLower(strings.TrimSpace(side)) {
+		case "source", "legacy":
+			doSource = true
+		case "eds":
+			doEDS = true
+		case "both":
+			doSource, doEDS = true, true
+		}
+	}
+	return doSource, doEDS
 }
 
 func (s *Service) runComparison(ctx context.Context, comparison ComparisonSummary, sourceRoot *url.URL, edsRoot *url.URL, opts ComparisonOptions) {
@@ -301,7 +417,7 @@ func (s *Service) runComparison(ctx context.Context, comparison ComparisonSummar
 		s.cancelComparison(comparison)
 		return
 	}
-	auditTargets = s.visualCompare(ctx, comparison.ID, homepageComparisonTargets(auditTargets), &comparison)
+	auditTargets = s.visualCompare(ctx, comparison.ID, autoVisualTargets(auditTargets), &comparison)
 	if ctx.Err() != nil {
 		s.cancelComparison(comparison)
 		return
@@ -592,10 +708,6 @@ func buildComparisonPagesWithOverrides(sourcePages []PageResult, edsPages []Page
 	}
 	addMatchCandidates(&groups, sourceByPath, edsByPath, usedEDS)
 	return groups
-}
-
-func comparePages(key string, source PageResult, eds PageResult) ComparedPage {
-	return comparePagesWithMatch(key, source, eds, "exact", "high")
 }
 
 func comparePagesWithMatch(key string, source PageResult, eds PageResult, matchType string, confidence string) ComparedPage {
@@ -1199,13 +1311,38 @@ func summarizeFastComparison(summary ComparisonSummary, groups comparisonPageGro
 	return summary
 }
 
-func homepageComparisonTargets(pages []ComparedPage) []ComparedPage {
+// autoVisualLimit caps how many matched pages get a visual diff automatically
+// after a comparison's fast and Lighthouse phases. The homepage is always
+// included; remaining slots go to the highest-severity pages. Anything beyond
+// the cap can be run on demand from the dashboard ("Run all").
+const autoVisualLimit = 12
+
+// autoVisualTargets selects the matched page pairs to screenshot automatically.
+// Only fully fetched pairs qualify (a visual diff needs both screenshots).
+func autoVisualTargets(pages []ComparedPage) []ComparedPage {
+	pairs := make([]ComparedPage, 0, len(pages))
 	for _, page := range pages {
-		if page.Path == "/" {
-			return []ComparedPage{page}
+		if page.Source.URL == "" || page.EDS.URL == "" {
+			continue
 		}
+		if page.Source.FetchError != "" || page.EDS.FetchError != "" {
+			continue
+		}
+		pairs = append(pairs, page)
 	}
-	return []ComparedPage{}
+	sort.SliceStable(pairs, func(i, j int) bool {
+		if (pairs[i].Path == "/") != (pairs[j].Path == "/") {
+			return pairs[i].Path == "/"
+		}
+		if pairs[i].Severity != pairs[j].Severity {
+			return pairs[i].Severity > pairs[j].Severity
+		}
+		return pairs[i].Path < pairs[j].Path
+	})
+	if len(pairs) > autoVisualLimit {
+		pairs = pairs[:autoVisualLimit]
+	}
+	return pairs
 }
 
 func comparisonTargetsByKey(result ComparisonResult, pageKeys []string) []ComparedPage {
@@ -1259,43 +1396,48 @@ func migrationScore(summary ComparisonSummary) *float64 {
 	return &score
 }
 
+// comparisonPathKey reduces a URL to the path identity used to match a legacy
+// page against its migrated EDS page. Host, scheme, query, and fragment are
+// dropped; the path is lowercased and trailing slashes removed. Crucially, a
+// trailing .html/.htm extension is stripped (legacy "about.html" matches EDS
+// "about") and directory index pages collapse onto their parent ("/foo/index"
+// -> "/foo", "/index.html" -> "/").
 func comparisonPathKey(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		value := strings.Trim(strings.ToLower(strings.TrimSpace(raw)), "/")
-		if value == "" {
-			return "/"
-		}
-		return "/" + value
+	path := raw
+	if parsed, err := url.Parse(raw); err == nil {
+		path = parsed.Path
 	}
-	path := strings.TrimSpace(parsed.Path)
-	if path == "" || path == "/" {
-		return "/"
+	path = strings.TrimSpace(path)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
 	}
 	path = strings.TrimRight(path, "/")
 	if path == "" {
 		return "/"
 	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
 	lower := strings.ToLower(path)
-	if lower == "/index" || lower == "/index.html" {
+	// Legacy sites commonly serve .html/.htm pages that migrate to extensionless
+	// EDS paths, so drop the extension before matching.
+	if strings.HasSuffix(lower, ".html") {
+		lower = strings.TrimSuffix(lower, ".html")
+	} else if strings.HasSuffix(lower, ".htm") {
+		lower = strings.TrimSuffix(lower, ".htm")
+	}
+	// Collapse directory index pages onto their parent path.
+	if lower == "/index" {
 		return "/"
 	}
 	if strings.HasSuffix(lower, "/index") {
-		path = path[:len(path)-len("/index")]
-	} else if strings.HasSuffix(lower, "/index.html") {
-		path = path[:len(path)-len("/index.html")]
+		lower = strings.TrimSuffix(lower, "/index")
 	}
-	if path == "" {
-		path = "/"
+	if lower == "" {
+		return "/"
 	}
-	return strings.ToLower(path)
+	return lower
 }
 
 func comparableValue(value string, urlish bool) string {
@@ -1376,16 +1518,6 @@ func pagesByURL(pages []PageResult) map[string]PageResult {
 		result[page.URL] = page
 	}
 	return result
-}
-
-func countFetchFailures(pages []PageResult) int {
-	count := 0
-	for _, page := range pages {
-		if page.FetchError != "" {
-			count++
-		}
-	}
-	return count
 }
 
 func pageStatusFromSeverity(severity int) string {

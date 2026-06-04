@@ -4,6 +4,7 @@ import {
   AlertCircle,
   BarChart3,
   Boxes,
+  Check,
   CheckCircle2,
   ClipboardList,
   ExternalLink,
@@ -423,6 +424,24 @@ export default function App() {
     }
   }
 
+  async function onUnmatchPair(row: ComparisonPageRow) {
+    const id = comparison?.summary.id;
+    if (!id || !row.source?.url || !row.eds?.url) {
+      return;
+    }
+    setError('');
+    try {
+      const updated = await updateComparisonMatch(id, row.source.url, row.eds.url, 'unmatch');
+      setComparison(updated);
+      setActiveComparison(updated.summary);
+      const rows = buildComparisonRows(updated);
+      setSelectedCompareID(preferredComparisonRow(rows)?.id || rows[0]?.id || null);
+      await refreshHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to unmatch pages');
+    }
+  }
+
   async function onRunComparisonVisuals(pageKeys: string[]) {
     const id = comparison?.summary.id;
     if (!id) {
@@ -590,17 +609,7 @@ export default function App() {
           </section>
         )}
 
-        {events.length > 0 && (
-          <section className="event-strip" aria-label="Live activity">
-            {events.map((event) => (
-              <span key={`${event.timestamp}-${event.type}-${event.pageUrl || ''}`}>
-                <span className="event-dot" aria-hidden />
-                {event.type.replace('-', ' ')}
-                {event.pageUrl ? `: ${compactURL(event.pageUrl)}` : event.message ? `: ${event.message}` : ''}
-              </span>
-            ))}
-          </section>
-        )}
+        {summary && <PhaseTimeline steps={scanPhaseSteps(summary)} />}
 
         {!scan && <EmptyState history={history} onOpen={(id) => void loadScan(id)} />}
 
@@ -639,6 +648,7 @@ export default function App() {
             onOpen={(id) => void loadComparison(id)}
             onViewport={setVisualViewport}
             onAcceptCandidate={(row, candidate) => void onAcceptCandidate(row, candidate)}
+            onUnmatch={(row) => void onUnmatchPair(row)}
             onRunVisuals={(pageKeys) => void onRunComparisonVisuals(pageKeys)}
           />
         )}
@@ -691,6 +701,7 @@ function CompareDashboard({
   onOpen,
   onViewport,
   onAcceptCandidate,
+  onUnmatch,
   onRunVisuals,
 }: {
   comparison: ComparisonResult | null;
@@ -711,6 +722,7 @@ function CompareDashboard({
   onOpen: (id: string) => void;
   onViewport: (value: 'desktop' | 'mobile') => void;
   onAcceptCandidate: (row: ComparisonPageRow, candidate: MatchCandidate) => void;
+  onUnmatch: (row: ComparisonPageRow) => void;
   onRunVisuals: (pageKeys: string[]) => void;
 }) {
   return (
@@ -752,17 +764,7 @@ function CompareDashboard({
         </section>
       )}
 
-      {events.length > 0 && (
-        <section className="event-strip" aria-label="Live comparison activity">
-          {events.map((event) => (
-            <span key={`${event.timestamp}-${event.type}-${event.pageUrl || ''}`}>
-              <span className="event-dot" aria-hidden />
-              {event.type.replace(/-/g, ' ')}
-              {event.pageUrl ? `: ${compactURL(event.pageUrl)}` : event.message ? `: ${event.message}` : ''}
-            </span>
-          ))}
-        </section>
-      )}
+      {summary && <PhaseTimeline steps={comparePhaseSteps(summary)} />}
 
       {!comparison && <CompareEmptyState history={history} onOpen={onOpen} />}
 
@@ -780,6 +782,7 @@ function CompareDashboard({
           visualViewport={visualViewport}
           onViewport={onViewport}
           onAcceptCandidate={onAcceptCandidate}
+          onUnmatch={onUnmatch}
           onRunVisuals={onRunVisuals}
         />
       )}
@@ -799,11 +802,16 @@ function CompareEmptyState({ history, onOpen }: { history: ComparisonSummary[]; 
         <span className="empty-icon">
           <Route size={30} strokeWidth={1.8} />
         </span>
-        <h2>No comparison selected</h2>
+        <h2>Compare a legacy site to its EDS migration</h2>
         <p>
-          Add a legacy URL and a migrated EDS URL in the bar above. The crawler will match paths,
-          compare content signals, and run visual checks for desktop and mobile.
+          Enter your current site URL and the new Edge Delivery URL in the bar above, then press
+          Compare. You&apos;ll get page matching, SEO and link parity, and side-by-side screenshots.
         </p>
+        <ol className="how-steps">
+          <li><strong>Legacy URL</strong><span>Your existing site, on any platform.</span></li>
+          <li><strong>Migrated EDS URL</strong><span>The new Edge Delivery site to validate.</span></li>
+          <li><strong>Compare</strong><span>Matches, gaps, and visual diffs stream in live.</span></li>
+        </ol>
       </div>
       {history.length > 0 && (
         <div className="empty-recent">
@@ -928,6 +936,7 @@ function ComparisonPagesView({
   visualViewport,
   onViewport,
   onAcceptCandidate,
+  onUnmatch,
   onRunVisuals,
 }: {
   comparison: ComparisonResult;
@@ -941,6 +950,7 @@ function ComparisonPagesView({
   visualViewport: 'desktop' | 'mobile';
   onViewport: (value: 'desktop' | 'mobile') => void;
   onAcceptCandidate: (row: ComparisonPageRow, candidate: MatchCandidate) => void;
+  onUnmatch: (row: ComparisonPageRow) => void;
   onRunVisuals: (pageKeys: string[]) => void;
 }) {
   const matchedPairs = [...comparison.matched, ...comparison.uncertainMatches];
@@ -952,13 +962,13 @@ function ComparisonPagesView({
           <h2>Review every matched and unmatched path</h2>
         </div>
         <div className="toolbar-actions">
-          <button type="button" className="btn btn-secondary" onClick={() => onRunVisuals(selectedRow ? [selectedRow.path] : [])} disabled={!selectedRow || !selectedRow.source || !selectedRow.eds}>
+          <button type="button" className="btn btn-secondary" onClick={() => onRunVisuals(selectedRow ? [selectedRow.path] : [])} disabled={!selectedRow || !selectedRow.source || !selectedRow.eds} title="Capture screenshots for the selected page">
             <PanelTop size={16} />
-            <span className="btn-label">Visual selected</span>
+            <span className="btn-label">Screenshot page</span>
           </button>
-          <button type="button" className="btn btn-secondary" onClick={() => onRunVisuals(rows.filter((row) => row.source && row.eds).map((row) => row.path))} disabled={!rows.some((row) => row.source && row.eds)}>
+          <button type="button" className="btn btn-secondary" onClick={() => onRunVisuals(rows.filter((row) => row.source && row.eds).map((row) => row.path))} disabled={!rows.some((row) => row.source && row.eds)} title="Capture screenshots for every page shown in the list">
             <PanelTop size={16} />
-            <span className="btn-label">Visual shown</span>
+            <span className="btn-label">Screenshot shown</span>
           </button>
         </div>
         <div className="search-field">
@@ -1002,7 +1012,7 @@ function ComparisonPagesView({
             </table>
           </div>
         </div>
-        <ComparedPageDetail row={selectedRow} viewport={visualViewport} onViewport={onViewport} onAcceptCandidate={onAcceptCandidate} />
+        <ComparedPageDetail row={selectedRow} viewport={visualViewport} onViewport={onViewport} onAcceptCandidate={onAcceptCandidate} onUnmatch={onUnmatch} onRunVisuals={onRunVisuals} />
       </section>
     </section>
   );
@@ -1013,17 +1023,22 @@ function ComparedPageDetail({
   viewport,
   onViewport,
   onAcceptCandidate,
+  onUnmatch,
+  onRunVisuals,
 }: {
   row: ComparisonPageRow | null;
   viewport: 'desktop' | 'mobile';
   onViewport: (value: 'desktop' | 'mobile') => void;
   onAcceptCandidate: (row: ComparisonPageRow, candidate: MatchCandidate) => void;
+  onUnmatch: (row: ComparisonPageRow) => void;
+  onRunVisuals: (pageKeys: string[]) => void;
 }) {
   if (!row) {
-    return <div className="panel detail-panel page-inspector"><h2>Page detail</h2><EmptyInline message="Select a page to inspect migration differences." /></div>;
+    return <div className="panel detail-panel page-inspector"><h2>Page detail</h2><EmptyInline message="Select a page on the left to inspect migration differences." /></div>;
   }
   const visual = row.visuals.find((item) => item.viewport === viewport);
   const canCompare = Boolean(row.source && row.eds);
+  const isPair = (row.group === 'matched' || row.group === 'uncertain') && canCompare;
   return (
     <div className="panel detail-panel page-inspector compare-inspector">
       <div className="inspector-head">
@@ -1039,6 +1054,13 @@ function ComparedPageDetail({
         {row.source ? <SideBySideMeta title="Legacy source" page={row.source} /> : <MissingSide title="Legacy source" message="Not found in source crawl." />}
         {row.eds ? <SideBySideMeta title="Migrated EDS" page={row.eds} /> : <MissingSide title="Migrated EDS" message="EDS page missing." />}
       </div>
+      {isPair && (
+        <div className="detail-actions">
+          <button type="button" className="btn btn-secondary btn-compact" onClick={() => onUnmatch(row)} title="Reject this pairing and move both pages back to unmatched">
+            <X size={14} /> Not a match
+          </button>
+        </div>
+      )}
       <div className="issue-stack tight">
         {[...row.issues, ...row.fieldDiffs.map((diff) => `${diff.field}: ${diff.source || 'missing'} -> ${diff.eds || 'missing'}`), ...row.linkDiffs.map((diff) => diff.field)].slice(0, 8).map((issue) => (
           <IssueItem key={issue} label={issue} detail="Review this page before launch." tone="warn" />
@@ -1067,10 +1089,19 @@ function ComparedPageDetail({
         </div>
       )}
       {canCompare && (
-        <>
-          <VisualToggle viewport={viewport} onViewport={onViewport} />
+        <div className="detail-visual">
+          <div className="panel-subhead">
+            <h3>Visual comparison</h3>
+            <VisualToggle viewport={viewport} onViewport={onViewport} />
+          </div>
+          <div className="detail-visual-actions">
+            <span className={`audit-status ${visualToneClass(visual?.status)}`}>{visualStatusLabel(visual)}</span>
+            <button type="button" className="btn btn-secondary btn-compact" onClick={() => onRunVisuals([row.path])}>
+              <PanelTop size={14} /> {visual ? 'Re-run' : 'Run'} {viewport}
+            </button>
+          </div>
           <VisualPreview visual={visual} />
-        </>
+        </div>
       )}
     </div>
   );
@@ -1111,34 +1142,46 @@ function ComparisonVisualView({
   onViewport: (value: 'desktop' | 'mobile') => void;
   onRunVisuals: (pageKeys: string[]) => void;
 }) {
-  const visuals = pages.flatMap((page) => page.visuals.filter((visual) => visual.viewport === viewport).map((visual) => ({ page, visual })));
+  const runnable = pages.filter((page) => page.source.url && page.eds.url && !page.source.fetchError && !page.eds.fetchError);
+  const captured = runnable.filter((page) => page.visuals.some((visual) => visual.viewport === viewport)).length;
   return (
     <section className="page-workspace">
       <div className="section-toolbar">
-        <div><p className="eyebrow">Visual diffs</p><h2>First viewport screenshot comparison</h2></div>
+        <div>
+          <p className="eyebrow">Visual comparison</p>
+          <h2>Legacy and migrated, side by side</h2>
+        </div>
         <div className="toolbar-actions">
           <VisualToggle viewport={viewport} onViewport={onViewport} />
-          <button type="button" className="btn btn-secondary" onClick={() => onRunVisuals(['/'])} disabled={!pages.some((page) => page.path === '/')}>
+          <button type="button" className="btn btn-secondary" onClick={() => onRunVisuals(runnable.map((page) => page.path))} disabled={runnable.length === 0}>
             <PanelTop size={16} />
-            <span className="btn-label">Run homepage</span>
-          </button>
-          <button type="button" className="btn btn-secondary" onClick={() => onRunVisuals(pages.map((page) => page.path))} disabled={pages.length === 0}>
-            <PanelTop size={16} />
-            <span className="btn-label">Run all</span>
+            <span className="btn-label">Run all {runnable.length} pages</span>
           </button>
         </div>
       </div>
+      <p className="panel-note">
+        {captured} of {runnable.length} matched pages captured for {viewport}. Screenshots run in the background — click any frame to open it full size.
+      </p>
       <div className="visual-grid">
-        {visuals.map(({ page, visual }) => (
-          <div key={`${page.path}-${visual.viewport}`} className={`visual-card ${visual.status}`}>
-            <div className="visual-card-head">
-              <strong>{page.path}</strong>
-              <span>{visual.status} / {visual.diffPercent}%</span>
+        {runnable.map((page) => {
+          const visual = page.visuals.find((item) => item.viewport === viewport);
+          return (
+            <div key={page.path} className={`visual-card ${visual?.status || 'pending'}`}>
+              <div className="visual-card-head">
+                <strong>{page.path}</strong>
+                {visual ? (
+                  <span className={`audit-status ${visualToneClass(visual.status)}`}>{visualStatusLabel(visual)}</span>
+                ) : (
+                  <button type="button" className="btn btn-secondary btn-compact" onClick={() => onRunVisuals([page.path])}>
+                    <Play size={13} /> Run
+                  </button>
+                )}
+              </div>
+              <VisualPreview visual={visual} />
             </div>
-            <VisualPreview visual={visual} />
-          </div>
-        ))}
-        {visuals.length === 0 && <EmptyInline message="Visual diffs have not completed yet." />}
+          );
+        })}
+        {runnable.length === 0 && <EmptyInline message="No matched page pairs to compare visually yet." />}
       </div>
     </section>
   );
@@ -1155,18 +1198,66 @@ function VisualToggle({ viewport, onViewport }: { viewport: 'desktop' | 'mobile'
 
 function VisualPreview({ visual }: { visual?: VisualDiff }) {
   if (!visual) {
-    return <EmptyInline message="Visual diff pending" />;
+    return <EmptyInline message="No screenshots yet — run a visual comparison above." />;
   }
   if (visual.error) {
-    return <div className="warning-box">{visual.error}</div>;
+    return <div className="warning-box">Screenshots unavailable: {visual.error}</div>;
   }
+  if (!visual.sourceImage && !visual.edsImage) {
+    return <EmptyInline message="Capturing screenshots…" />;
+  }
+  const frames = [
+    { label: 'Legacy', src: visual.sourceImage },
+    { label: 'Migrated EDS', src: visual.edsImage },
+    { label: 'Difference', src: visual.diffImage },
+  ].filter((frame) => frame.src);
   return (
     <div className="visual-preview">
-      {visual.sourceImage && <img src={visual.sourceImage} alt={`${visual.viewport} source screenshot`} />}
-      {visual.edsImage && <img src={visual.edsImage} alt={`${visual.viewport} EDS screenshot`} />}
-      {visual.diffImage && <img src={visual.diffImage} alt={`${visual.viewport} visual diff`} />}
+      {frames.map((frame) => (
+        <a key={frame.label} className="visual-frame" href={frame.src} target="_blank" rel="noreferrer" title="Open full screenshot">
+          <img src={frame.src} alt={`${visual.viewport} ${frame.label} screenshot`} loading="lazy" />
+          <span className="visual-frame-caption">{frame.label}</span>
+        </a>
+      ))}
     </div>
   );
+}
+
+// visualStatusLabel turns a raw visual diff status into a plain-English label.
+function visualStatusLabel(visual?: VisualDiff): string {
+  if (!visual) {
+    return 'Pending';
+  }
+  switch (visual.status) {
+    case 'pass':
+      return 'Visual match';
+    case 'review':
+      return `Minor diff · ${visual.diffPercent}%`;
+    case 'fail':
+      return `Major diff · ${visual.diffPercent}%`;
+    case 'unavailable':
+      return 'Unavailable';
+    case 'error':
+      return 'Error';
+    default:
+      return visual.status || 'Pending';
+  }
+}
+
+// visualToneClass maps a visual status onto the shared audit-status pill tones.
+function visualToneClass(status?: string): string {
+  switch (status) {
+    case 'pass':
+      return 'complete';
+    case 'review':
+      return 'running';
+    case 'fail':
+    case 'error':
+    case 'unavailable':
+      return 'failed';
+    default:
+      return '';
+  }
 }
 
 function ComparisonBlocksView({ comparison }: { comparison: ComparisonResult }) {
@@ -2094,6 +2185,116 @@ function ScoreGauge({ label, score }: { label: string; score: number | null }) {
 
 function ScoreBadge({ score }: { score: number | null }) {
   return <span className={`score-badge ${scoreTone(score)}`}>{formatScore(score)}</span>;
+}
+
+type PhaseState = 'done' | 'active' | 'pending' | 'cancelled';
+interface PhaseStep {
+  label: string;
+  detail: string;
+  state: PhaseState;
+}
+
+function PhaseTimeline({ steps }: { steps: PhaseStep[] }) {
+  return (
+    <ol className="phase-timeline" aria-label="Progress">
+      {steps.map((step, index) => (
+        <li key={step.label} className={`phase-step ${step.state}`}>
+          <span className="phase-dot" aria-hidden>
+            {step.state === 'done' ? (
+              <Check size={15} strokeWidth={3} />
+            ) : step.state === 'active' ? (
+              <Loader2 size={14} className="spin" />
+            ) : step.state === 'cancelled' ? (
+              <X size={14} />
+            ) : (
+              index + 1
+            )}
+          </span>
+          <span className="phase-label">{step.label}</span>
+          {step.detail && <span className="phase-detail">{step.detail}</span>}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+// buildPhaseSteps turns an ordered list of phase definitions plus the active
+// index into render-ready steps. Detail text is only shown for finished, active,
+// or cancelled steps so upcoming steps stay clean.
+function buildPhaseSteps(
+  defs: Array<{ label: string; detail: string }>,
+  activeIndex: number,
+  status: string,
+): PhaseStep[] {
+  const completed = status === 'completed';
+  const cancelled = status === 'cancelled';
+  return defs.map((def, index) => {
+    let state: PhaseState;
+    if (cancelled && index >= activeIndex) {
+      state = index === activeIndex ? 'cancelled' : 'pending';
+    } else if (index < activeIndex) {
+      state = 'done';
+    } else if (index === activeIndex) {
+      state = completed ? 'done' : 'active';
+    } else {
+      state = 'pending';
+    }
+    return { label: def.label, detail: state === 'pending' ? '' : def.detail, state };
+  });
+}
+
+function comparePhaseSteps(summary: ComparisonSummary): PhaseStep[] {
+  const phase = summary.backgroundPhase || summary.phase || summary.status;
+  const indexByPhase: Record<string, number> = {
+    'source-crawl': 0,
+    'eds-crawl': 0,
+    crawling: 0,
+    matching: 1,
+    'fast-complete': 1,
+    lighthouse: 2,
+    'visual-diff': 3,
+    completed: 4,
+  };
+  let active = indexByPhase[phase] ?? 0;
+  if (summary.status === 'completed') {
+    active = 4;
+  }
+  return buildPhaseSteps(
+    [
+      { label: 'Crawl', detail: `${summary.sourceAnalyzed + summary.edsAnalyzed} pages` },
+      { label: 'Match', detail: `${summary.matchedPages} matched` },
+      { label: 'Lighthouse', detail: `${summary.lighthouseCompleted}/${summary.lighthouseQueued}` },
+      { label: 'Visual', detail: `${summary.visualCompleted}/${summary.visualQueued}` },
+      { label: 'Complete', detail: summary.status === 'cancelled' ? 'Cancelled' : 'Done' },
+    ],
+    active,
+    summary.status,
+  );
+}
+
+function scanPhaseSteps(summary: ScanSummary): PhaseStep[] {
+  const phase = summary.phase || summary.status;
+  const indexByPhase: Record<string, number> = {
+    discovering: 0,
+    analyzing: 1,
+    'fast-complete': 1,
+    auditing: 2,
+    completed: 3,
+  };
+  let active = indexByPhase[phase] ?? 0;
+  if (summary.status === 'completed') {
+    active = 3;
+  }
+  return buildPhaseSteps(
+    [
+      { label: 'Discover', detail: `${summary.discoveredPages} found` },
+      { label: 'Analyze', detail: `${summary.fastCompletedPages}/${summary.discoveredPages}` },
+      { label: 'Lighthouse', detail: `${summary.auditCompletedPages}/${summary.auditQueuedPages}` },
+      { label: 'Complete', detail: summary.status === 'cancelled' ? 'Cancelled' : 'Done' },
+    ],
+    active,
+    summary.status,
+  );
 }
 
 function buildComparisonRows(comparison: ComparisonResult | null): ComparisonPageRow[] {

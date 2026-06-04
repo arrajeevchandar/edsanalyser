@@ -63,6 +63,29 @@ func TestBuildComparisonPagesMatchesCanonicalAliasesAsHighConfidence(t *testing.
 	}
 }
 
+func TestBuildComparisonPagesMatchesHTMLExtensionAsExact(t *testing.T) {
+	source := []PageResult{
+		{URL: "https://legacy.example.com/about.html", Title: "About"},
+		{URL: "https://legacy.example.com/products/shoe.html", Title: "Shoe"},
+	}
+	eds := []PageResult{
+		{URL: "https://main--site--org.aem.live/about", Title: "About"},
+		{URL: "https://main--site--org.aem.live/products/shoe", Title: "Shoe"},
+	}
+	groups := buildComparisonPages(source, eds)
+	if len(groups.Matched) != 2 {
+		t.Fatalf("expected .html pages to match extensionless EDS paths, got matched=%+v missing=%+v", groups.Matched, groups.MissingInEDS)
+	}
+	for _, match := range groups.Matched {
+		if match.MatchType != "exact" || match.MatchConfidence != "high" {
+			t.Fatalf("expected exact high-confidence match, got %+v", match)
+		}
+	}
+	if len(groups.MissingInEDS) != 0 || len(groups.ExtraInEDS) != 0 {
+		t.Fatalf("expected no missing/extra pages, got missing=%+v extra=%+v", groups.MissingInEDS, groups.ExtraInEDS)
+	}
+}
+
 func TestBuildComparisonPagesMatchesPathCleanupAsUncertain(t *testing.T) {
 	source := []PageResult{{URL: "https://legacy.example.com/en/about.html", Title: "About"}}
 	eds := []PageResult{{URL: "https://main--site--org.aem.live/about", Title: "About"}}
@@ -258,8 +281,10 @@ func TestComparisonCrawlsSameOriginLinksBeyondHome(t *testing.T) {
 	if result.Summary.ExtraInEDS != 1 || len(result.ExtraInEDS) != 1 {
 		t.Fatalf("expected one EDS-only page, got summary=%+v extra=%+v", result.Summary, result.ExtraInEDS)
 	}
-	if result.Summary.VisualQueued != 2 || result.Summary.VisualCompleted != 2 {
-		t.Fatalf("default comparison should run visual diff only for homepage desktop/mobile, got %+v", result.Summary)
+	// Default visual diff runs for every matched pair (4 pages) across desktop and
+	// mobile, capped by autoVisualLimit.
+	if result.Summary.VisualQueued != 8 || result.Summary.VisualCompleted != 8 {
+		t.Fatalf("default comparison should run visual diff for all matched pages desktop/mobile, got %+v", result.Summary)
 	}
 	if result.Discovery.Source.FromStaticLinks < 3 || result.Discovery.EDS.FromStaticLinks < 4 {
 		t.Fatalf("expected static link discovery to expand both sites, got %+v", result.Discovery)

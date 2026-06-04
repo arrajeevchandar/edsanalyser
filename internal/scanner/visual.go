@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -68,12 +69,26 @@ func (r ChromeVisualRunner) Diff(ctx context.Context, comparisonID string, pageK
 	edsFile := filepath.Join(dir, slug+"-"+viewport.Name+"-eds.png")
 	diffFile := filepath.Join(dir, slug+"-"+viewport.Name+"-diff.png")
 
-	if err := r.capture(ctx, chrome, sourceURL, sourceFile, viewport); err != nil {
-		visual.Error = err.Error()
+	// Capture both screenshots concurrently — each launches its own headless
+	// browser process, so running them in parallel roughly halves the per-page time.
+	var wg sync.WaitGroup
+	var sourceErr, edsErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		sourceErr = r.capture(ctx, chrome, sourceURL, sourceFile, viewport)
+	}()
+	go func() {
+		defer wg.Done()
+		edsErr = r.capture(ctx, chrome, edsURL, edsFile, viewport)
+	}()
+	wg.Wait()
+	if sourceErr != nil {
+		visual.Error = "legacy screenshot failed: " + sourceErr.Error()
 		return visual
 	}
-	if err := r.capture(ctx, chrome, edsURL, edsFile, viewport); err != nil {
-		visual.Error = err.Error()
+	if edsErr != nil {
+		visual.Error = "EDS screenshot failed: " + edsErr.Error()
 		return visual
 	}
 	percent, err := writeImageDiff(sourceFile, edsFile, diffFile)
@@ -94,19 +109,34 @@ func (r ChromeVisualRunner) chromePath() (string, error) {
 	if r.Chrome != "" {
 		return r.Chrome, nil
 	}
-	candidates := []string{"chrome", "google-chrome", "chromium", "chromium-browser"}
-	if runtime.GOOS == "windows" {
-		candidates = append([]string{"chrome.exe"}, candidates...)
-		for _, path := range []string{
+	// Chromium-based browsers all support the same headless screenshot flags, so
+	// Microsoft Edge (present on every modern Windows install) is a first-class
+	// fallback when Google Chrome is not installed.
+	candidates := []string{"chrome", "google-chrome", "chromium", "chromium-browser", "msedge", "microsoft-edge"}
+	var explicit []string
+	switch runtime.GOOS {
+	case "windows":
+		candidates = append([]string{"chrome.exe", "msedge.exe"}, candidates...)
+		explicit = []string{
 			filepath.Join(os.Getenv("ProgramFiles"), "Google", "Chrome", "Application", "chrome.exe"),
 			filepath.Join(os.Getenv("ProgramFiles(x86)"), "Google", "Chrome", "Application", "chrome.exe"),
 			filepath.Join(os.Getenv("LocalAppData"), "Google", "Chrome", "Application", "chrome.exe"),
-		} {
-			if path != "" {
-				if _, err := os.Stat(path); err == nil {
-					return path, nil
-				}
-			}
+			filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft", "Edge", "Application", "msedge.exe"),
+			filepath.Join(os.Getenv("ProgramFiles"), "Microsoft", "Edge", "Application", "msedge.exe"),
+		}
+	case "darwin":
+		explicit = []string{
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+		}
+	}
+	for _, path := range explicit {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
 		}
 	}
 	for _, candidate := range candidates {
@@ -114,20 +144,42 @@ func (r ChromeVisualRunner) chromePath() (string, error) {
 			return path, nil
 		}
 	}
-	return "", fmt.Errorf("chrome executable not found")
+	return "", fmt.Errorf("no Chromium-based browser (Chrome or Edge) was found for screenshots")
 }
 
 func (r ChromeVisualRunner) capture(ctx context.Context, chrome string, pageURL string, output string, viewport VisualViewport) error {
 	captureCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
+
+	// A dedicated, throwaway profile per capture is essential: without it, a
+	// headless launch hands off to any already-running Chrome (e.g. the user's
+	// open browser) and exits 0 without taking the screenshot, or blocks on the
+	// profile lock until the deadline. It also lets captures run concurrently.
+	profile, err := os.MkdirTemp("", "eds-shot-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(profile)
+
+	// Resolve an absolute output path so it never depends on Chrome's CWD.
+	target := output
+	if abs, absErr := filepath.Abs(output); absErr == nil {
+		target = abs
+	}
+
 	cmd := exec.CommandContext(captureCtx, chrome,
 		"--headless=new",
 		"--disable-gpu",
 		"--hide-scrollbars",
 		"--no-sandbox",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-extensions",
+		"--disable-dev-shm-usage",
+		"--user-data-dir="+profile,
 		fmt.Sprintf("--window-size=%d,%d", viewport.Width, viewport.Height),
-		"--virtual-time-budget=5000",
-		"--screenshot="+output,
+		"--virtual-time-budget=8000",
+		"--screenshot="+target,
 		pageURL,
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -135,6 +187,11 @@ func (r ChromeVisualRunner) capture(ctx context.Context, chrome string, pageURL 
 			return captureCtx.Err()
 		}
 		return fmt.Errorf("chrome screenshot failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	// Chrome can exit 0 without producing a file; treat that as a failure here so
+	// the diff step reports a clear cause instead of a downstream "file not found".
+	if info, statErr := os.Stat(output); statErr != nil || info.Size() == 0 {
+		return fmt.Errorf("chrome exited without writing a screenshot")
 	}
 	return nil
 }

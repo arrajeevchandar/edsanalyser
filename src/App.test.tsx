@@ -29,7 +29,7 @@ describe('App', () => {
     render(<App />);
 
     expect(screen.getByText('EDS Analyser')).toBeInTheDocument();
-    expect(await screen.findByText('No comparison selected')).toBeInTheDocument();
+    expect(await screen.findByText('Compare a legacy site to its EDS migration')).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith('/api/scans', expect.any(Object));
     expect(fetchMock).toHaveBeenCalledWith('/api/comparisons', expect.any(Object));
   });
@@ -39,7 +39,7 @@ describe('App', () => {
 
     render(<App />);
 
-    expect(await screen.findByText('No comparison selected')).toBeInTheDocument();
+    expect(await screen.findByText('Compare a legacy site to its EDS migration')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Scan' }));
     expect(await screen.findByText('No scan selected')).toBeInTheDocument();
   });
@@ -113,7 +113,7 @@ describe('App', () => {
     expect(screen.getByText('Missing in EDS')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Pages' }));
-    expect(await screen.findByText('Visual diff pending')).toBeInTheDocument();
+    expect(await screen.findByText(/No screenshots yet/)).toBeInTheDocument();
     expect(screen.getByText('Legacy source')).toBeInTheDocument();
     expect(screen.getByText('Migrated EDS')).toBeInTheDocument();
     expect(screen.getByText('Missing in EDS')).toBeInTheDocument();

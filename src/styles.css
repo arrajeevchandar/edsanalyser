@@ -347,6 +347,25 @@ button {
   border-color: var(--red);
 }
 
+.btn-secondary {
+  color: var(--ink-900);
+  background: var(--surface);
+  border-color: var(--line);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-secondary:not(:disabled):hover {
+  border-color: var(--ink-900);
+  background: var(--surface-2);
+}
+
+.btn-compact {
+  height: 30px;
+  padding: 0 11px;
+  font-size: 0.8rem;
+  box-shadow: none;
+}
+
 /* Tab rail ------------------------------------------------------ */
 
 .tabrail {
@@ -657,6 +676,119 @@ p {
 
 .metric.bad strong {
   color: var(--bad);
+}
+
+/* Phase timeline ------------------------------------------------ */
+
+.phase-timeline {
+  display: flex;
+  gap: 0;
+  margin: 0 0 20px;
+  padding: 18px 20px 16px;
+  list-style: none;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-sm);
+  overflow-x: auto;
+}
+
+.phase-step {
+  position: relative;
+  flex: 1 0 0;
+  min-width: 86px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  text-align: center;
+  padding: 0 8px;
+}
+
+/* Connector line from the previous step into this one. */
+.phase-step::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  right: 50%;
+  width: 100%;
+  height: 2px;
+  background: var(--line);
+}
+
+.phase-step:first-child::before {
+  display: none;
+}
+
+.phase-step.done::before,
+.phase-step.active::before {
+  background: var(--red);
+}
+
+.phase-dot {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2px solid var(--line);
+  color: var(--ink-400);
+  font-family: "Spline Sans Mono", ui-monospace, monospace;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.phase-step.done .phase-dot {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+.phase-step.active .phase-dot {
+  border-color: var(--red);
+  color: var(--red);
+  box-shadow: 0 0 0 4px var(--red-tint);
+  animation: phase-pulse 1.6s ease-in-out infinite;
+}
+
+.phase-step.cancelled .phase-dot {
+  border-color: var(--ink-400);
+  color: var(--ink-500);
+}
+
+.phase-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--ink-400);
+}
+
+.phase-step.done .phase-label,
+.phase-step.active .phase-label,
+.phase-step.cancelled .phase-label {
+  color: var(--ink-900);
+}
+
+.phase-detail {
+  font-size: 0.72rem;
+  color: var(--ink-400);
+  font-family: "Spline Sans Mono", ui-monospace, monospace;
+}
+
+.phase-step.active .phase-detail {
+  color: var(--red);
+}
+
+@keyframes phase-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(250, 15, 0, 0.28);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(250, 15, 0, 0);
+  }
 }
 
 /* Event strip --------------------------------------------------- */
@@ -1885,20 +2017,123 @@ tbody tr.selected td {
   font-size: 0.82rem;
 }
 
+.visual-card.pending {
+  border-style: dashed;
+}
+
 .visual-preview {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 10px;
 }
 
-.visual-preview img {
+.visual-frame {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  text-decoration: none;
+}
+
+.visual-frame img {
   display: block;
   width: 100%;
-  aspect-ratio: 4 / 3;
-  object-fit: cover;
+  height: 260px;
+  object-fit: contain;
+  object-position: top;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--surface-2);
+  transition: border-color 0.16s var(--ease);
+}
+
+.visual-frame:hover img {
+  border-color: var(--red);
+}
+
+.visual-frame-caption {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-500);
+  text-align: center;
+}
+
+.detail-visual {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.detail-visual-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.how-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.how-steps li {
+  counter-increment: step;
+  position: relative;
+  padding: 14px 14px 14px 44px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+}
+
+.how-steps li::before {
+  content: counter(step);
+  position: absolute;
+  top: 13px;
+  left: 13px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--red);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.how-steps strong {
+  display: block;
+  color: var(--ink-900);
+  font-size: 0.9rem;
+}
+
+.how-steps span {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-500);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+@media (max-width: 720px) {
+  .how-steps {
+    grid-template-columns: 1fr;
+  }
 }
 
 .compare-diff-table th:nth-child(1),

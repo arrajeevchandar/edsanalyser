@@ -256,32 +256,6 @@ func (d Discoverer) fetchDiscoveryEndpoint(ctx context.Context, client *http.Cli
 	return ParseDiscoveryJSON(body, root), nil
 }
 
-func (d Discoverer) linksFromPage(ctx context.Context, client *http.Client, pageURL string, root *url.URL) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("fallback page returned %d", resp.StatusCode)
-	}
-	page, err := AnalyzeHTML(pageURL, io.LimitReader(resp.Body, 16*1024*1024), root)
-	if err != nil {
-		return nil, err
-	}
-	var urls []string
-	for _, link := range page.Links {
-		if link.Kind == "internal" {
-			urls = append(urls, link.URL)
-		}
-	}
-	return urls, nil
-}
-
 func ParseSitemapXML(body []byte) ([]string, []string) {
 	type loc struct {
 		Loc string `xml:"loc"`
