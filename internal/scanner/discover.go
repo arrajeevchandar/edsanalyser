@@ -12,32 +12,76 @@ import (
 	"time"
 )
 
+type DiscoveredURL struct {
+	URL    string
+	Source string
+}
+
 type Discoverer struct {
 	Client *http.Client
 }
 
 func (d Discoverer) Discover(ctx context.Context, start *url.URL) ([]string, error) {
+	seeds, _ := d.DiscoverDetailed(ctx, start)
+	pages := make([]string, 0, len(seeds))
+	for _, seed := range seeds {
+		pages = append(pages, seed.URL)
+	}
+	return pages, nil
+}
+
+func (d Discoverer) DiscoverDetailed(ctx context.Context, start *url.URL) ([]DiscoveredURL, DiscoveryReport) {
 	client := d.Client
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}
 	}
 
 	seen := map[string]bool{}
-	var pages []string
-	add := func(raw string) {
+	report := DiscoveryReport{RootURL: start.String(), Warnings: []string{}}
+	var pages []DiscoveredURL
+	add := func(raw string, source string) {
 		normalized, ok := normalizePageURL(raw, start)
 		if !ok {
+			if looksLikeAssetOrDownload(raw, start) {
+				report.SkippedAssets++
+			}
 			return
 		}
 		parsed, err := url.Parse(normalized)
-		if err != nil || !sameOrigin(parsed, start) || seen[normalized] {
+		if err != nil {
+			return
+		}
+		if !sameOrigin(parsed, start) {
+			report.SkippedExternal++
+			return
+		}
+		if seen[normalized] {
+			report.Duplicates++
 			return
 		}
 		seen[normalized] = true
-		pages = append(pages, normalized)
+		pages = append(pages, DiscoveredURL{URL: normalized, Source: source})
+		report.TotalQueued = len(pages)
+		switch source {
+		case "robots":
+			report.FromRobots++
+		case "sitemap":
+			report.FromSitemap++
+		case "query-index":
+			report.FromQueryIndex++
+		}
 	}
 
-	for _, path := range []string{"/sitemap.xml", "/sitemap.json", "/query-index.json"} {
+	for _, sitemapURL := range d.robotsSitemaps(ctx, client, start) {
+		found, err := d.fetchDiscoveryEndpoint(ctx, client, sitemapURL, start)
+		if err == nil {
+			for _, page := range found {
+				add(page, "robots")
+			}
+		}
+	}
+
+	for _, path := range []string{"/sitemap.xml", "/sitemap.json"} {
 		endpoint := *start
 		endpoint.Path = path
 		endpoint.RawQuery = ""
@@ -46,21 +90,131 @@ func (d Discoverer) Discover(ctx context.Context, start *url.URL) ([]string, err
 		found, err := d.fetchDiscoveryEndpoint(ctx, client, endpoint.String(), start)
 		if err == nil {
 			for _, page := range found {
-				add(page)
+				add(page, "sitemap")
 			}
 		}
 	}
 
-	add(start.String())
-	if len(pages) == 1 {
-		fallback, err := d.linksFromPage(ctx, client, start.String(), start)
+	queryIndex := *start
+	queryIndex.Path = "/query-index.json"
+	queryIndex.RawQuery = ""
+	queryIndex.Fragment = ""
+	if found, err := d.fetchQueryIndexEndpoint(ctx, client, queryIndex.String(), start); err == nil {
+		for _, page := range found {
+			add(page, "query-index")
+		}
+	}
+
+	add(start.String(), "root")
+	return pages, report
+}
+
+func (d Discoverer) robotsSitemaps(ctx context.Context, client *http.Client, root *url.URL) []string {
+	robots := *root
+	robots.Path = "/robots.txt"
+	robots.RawQuery = ""
+	robots.Fragment = ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, robots.String(), nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	if err != nil {
+		return nil
+	}
+	return ParseRobotsSitemaps(string(body))
+}
+
+func (d Discoverer) fetchQueryIndexEndpoint(ctx context.Context, client *http.Client, endpoint string, root *url.URL) ([]string, error) {
+	body, err := d.fetchBody(ctx, client, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	pages, total, offset, limit := ParseQueryIndexJSON(body, root)
+	if total <= 0 || limit <= 0 || len(pages) >= total {
+		return pages, nil
+	}
+	seenOffsets := map[int]bool{offset: true}
+	for nextOffset := offset + limit; nextOffset < total; nextOffset += limit {
+		if seenOffsets[nextOffset] {
+			break
+		}
+		seenOffsets[nextOffset] = true
+		nextURL, err := url.Parse(endpoint)
+		if err != nil {
+			break
+		}
+		query := nextURL.Query()
+		query.Set("offset", fmt.Sprintf("%d", nextOffset))
+		query.Set("limit", fmt.Sprintf("%d", limit))
+		nextURL.RawQuery = query.Encode()
+		nextBody, err := d.fetchBody(ctx, client, nextURL.String())
 		if err == nil {
-			for _, page := range fallback {
-				add(page)
-			}
+			nextPages, _, _, _ := ParseQueryIndexJSON(nextBody, root)
+			pages = append(pages, nextPages...)
 		}
 	}
 	return pages, nil
+}
+
+func (d Discoverer) fetchBody(ctx context.Context, client *http.Client, endpoint string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("discovery endpoint %s returned %d", endpoint, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 16*1024*1024))
+}
+
+func looksLikeAssetOrDownload(raw string, base *url.URL) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	resolved := base.ResolveReference(parsed)
+	return isExcludedAssetURL(resolved)
+}
+
+func ParseRobotsSitemaps(body string) []string {
+	var sitemaps []string
+	for _, line := range strings.Split(body, "\n") {
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 || strings.ToLower(strings.TrimSpace(parts[0])) != "sitemap" {
+			continue
+		}
+		if value := strings.TrimSpace(parts[1]); value != "" {
+			sitemaps = append(sitemaps, value)
+		}
+	}
+	return sitemaps
+}
+
+func ParseQueryIndexJSON(body []byte, root *url.URL) ([]string, int, int, int) {
+	pages := ParseDiscoveryJSON(body, root)
+	var metadata struct {
+		Total  int `json:"total"`
+		Offset int `json:"offset"`
+		Limit  int `json:"limit"`
+	}
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		return pages, 0, 0, 0
+	}
+	return pages, metadata.Total, metadata.Offset, metadata.Limit
 }
 
 func (d Discoverer) fetchDiscoveryEndpoint(ctx context.Context, client *http.Client, endpoint string, root *url.URL) ([]string, error) {

@@ -905,6 +905,10 @@ h3 {
   align-items: stretch;
 }
 
+.discovery-panel .mini-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .split-workspace {
   display: grid;
   grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
@@ -1468,7 +1472,7 @@ h3 {
 
 .pages-layout {
   display: grid;
-  grid-template-columns: minmax(420px, 1.2fr) minmax(320px, 0.8fr);
+  grid-template-columns: minmax(300px, 0.62fr) minmax(560px, 1.38fr);
   gap: 16px;
   align-items: start;
 }
@@ -1738,6 +1742,11 @@ tbody tr.selected td {
   border: 1px solid var(--line);
 }
 
+.compare-meta-panel.missing-side {
+  justify-content: center;
+  min-height: 220px;
+}
+
 .compare-meta-panel h3 {
   margin: 0 0 2px;
 }
@@ -1753,6 +1762,13 @@ tbody tr.selected td {
   border-radius: 999px;
   background: var(--surface);
   border: 1px solid var(--line);
+}
+
+.compare-filter-control {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+  margin-bottom: 14px;
 }
 
 .segmented-control button {
@@ -2037,6 +2053,24 @@ dd {
 .link-kind.asset {
   color: var(--ink-700);
   background: var(--line);
+}
+
+.link-kind.matched {
+  color: #fff;
+  background: var(--ink-900);
+}
+
+.link-kind.uncertain,
+.link-kind.extra {
+  color: var(--warn);
+  background: var(--warn-tint);
+}
+
+.link-kind.missing,
+.link-kind.source-failed,
+.link-kind.eds-failed {
+  color: var(--bad);
+  background: var(--bad-tint);
 }
 
 /* Audit status -------------------------------------------------- */

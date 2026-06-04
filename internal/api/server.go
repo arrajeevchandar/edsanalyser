@@ -173,9 +173,11 @@ func (s *Server) comparisons(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, comparisons)
 	case http.MethodPost:
 		var body struct {
-			SourceURL  string `json:"sourceUrl"`
-			EDSURL     string `json:"edsUrl"`
-			CrawlLimit *int   `json:"crawlLimit"`
+			SourceURL         string `json:"sourceUrl"`
+			EDSURL            string `json:"edsUrl"`
+			CrawlLimit        *int   `json:"crawlLimit"`
+			CrawlMode         string `json:"crawlMode"`
+			RenderedDiscovery string `json:"renderedDiscovery"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, http.StatusBadRequest, err)
@@ -183,6 +185,8 @@ func (s *Server) comparisons(w http.ResponseWriter, r *http.Request) {
 		}
 		opts := scanner.DefaultComparisonOptions()
 		opts.CrawlLimit = body.CrawlLimit
+		opts.CrawlMode = body.CrawlMode
+		opts.RenderedDiscovery = body.RenderedDiscovery
 		comparison, err := s.service.StartComparison(r.Context(), body.SourceURL, body.EDSURL, opts)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err)

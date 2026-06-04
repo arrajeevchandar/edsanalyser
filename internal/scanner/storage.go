@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS comparisons (
   source_pages INTEGER NOT NULL DEFAULT 0,
   eds_pages INTEGER NOT NULL DEFAULT 0,
   matched_pages INTEGER NOT NULL DEFAULT 0,
+  uncertain_matches INTEGER NOT NULL DEFAULT 0,
   missing_in_eds INTEGER NOT NULL DEFAULT 0,
   extra_in_eds INTEGER NOT NULL DEFAULT 0,
   source_fetch_failures INTEGER NOT NULL DEFAULT 0,
@@ -135,6 +136,8 @@ CREATE TABLE IF NOT EXISTS comparisons (
   lighthouse_completed INTEGER NOT NULL DEFAULT 0,
   lighthouse_failed INTEGER NOT NULL DEFAULT 0,
   migration_score REAL,
+  source_discovery_json TEXT NOT NULL DEFAULT '{}',
+  eds_discovery_json TEXT NOT NULL DEFAULT '{}',
   error TEXT
 );
 CREATE TABLE IF NOT EXISTS comparison_pages (
@@ -144,6 +147,10 @@ CREATE TABLE IF NOT EXISTS comparison_pages (
   group_name TEXT NOT NULL,
   status TEXT NOT NULL,
   severity INTEGER NOT NULL DEFAULT 0,
+  match_type TEXT NOT NULL DEFAULT '',
+  match_confidence TEXT NOT NULL DEFAULT '',
+  source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  eds_aliases_json TEXT NOT NULL DEFAULT '[]',
   source_json TEXT NOT NULL,
   eds_json TEXT NOT NULL,
   field_diffs_json TEXT NOT NULL,
@@ -178,6 +185,13 @@ CREATE TABLE IF NOT EXISTS comparison_visuals (
 		{"scans", "audit_completed_pages", "INTEGER NOT NULL DEFAULT 0"},
 		{"scans", "audit_failed_pages", "INTEGER NOT NULL DEFAULT 0"},
 		{"pages", "audit_status", "TEXT NOT NULL DEFAULT ''"},
+		{"comparisons", "uncertain_matches", "INTEGER NOT NULL DEFAULT 0"},
+		{"comparisons", "source_discovery_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"comparisons", "eds_discovery_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"comparison_pages", "match_type", "TEXT NOT NULL DEFAULT ''"},
+		{"comparison_pages", "match_confidence", "TEXT NOT NULL DEFAULT ''"},
+		{"comparison_pages", "source_aliases_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"comparison_pages", "eds_aliases_json", "TEXT NOT NULL DEFAULT '[]'"},
 	} {
 		if err := s.ensureColumn(column.table, column.name, column.def); err != nil {
 			return err
@@ -327,19 +341,22 @@ FROM pages WHERE scan_id = ? ORDER BY url`, id)
 }
 
 func (s *SQLiteStore) CreateComparison(comparison ComparisonSummary) error {
+	sourceDiscovery, _ := json.Marshal(NormalizeDiscoveryReport(comparison.SourceDiscovery))
+	edsDiscovery, _ := json.Marshal(NormalizeDiscoveryReport(comparison.EDSDiscovery))
 	_, err := s.db.Exec(`
 INSERT INTO comparisons (
   id, source_input_url, eds_input_url, source_root_url, eds_root_url, status, phase, started_at,
-  source_pages, eds_pages, matched_pages, missing_in_eds, extra_in_eds, source_fetch_failures, eds_fetch_failures,
+  source_pages, eds_pages, matched_pages, uncertain_matches, missing_in_eds, extra_in_eds, source_fetch_failures, eds_fetch_failures,
   metadata_diffs, link_diffs, visual_queued, visual_completed, visual_failed, visual_review, visual_fail,
-  lighthouse_queued, lighthouse_completed, lighthouse_failed, migration_score, error
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  lighthouse_queued, lighthouse_completed, lighthouse_failed, migration_score, source_discovery_json, eds_discovery_json, error
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		comparison.ID, comparison.SourceInputURL, comparison.EDSInputURL, comparison.SourceRootURL, comparison.EDSRootURL,
 		comparison.Status, comparison.Phase, comparison.StartedAt.Format(time.RFC3339Nano),
-		comparison.SourcePages, comparison.EDSPages, comparison.MatchedPages, comparison.MissingInEDS, comparison.ExtraInEDS,
+		comparison.SourcePages, comparison.EDSPages, comparison.MatchedPages, comparison.UncertainMatches, comparison.MissingInEDS, comparison.ExtraInEDS,
 		comparison.SourceFetchFailures, comparison.EDSFetchFailures, comparison.MetadataDiffs, comparison.LinkDiffs,
 		comparison.VisualQueued, comparison.VisualCompleted, comparison.VisualFailed, comparison.VisualReview, comparison.VisualFail,
-		comparison.LighthouseQueued, comparison.LighthouseCompleted, comparison.LighthouseFailed, nullable(comparison.MigrationScore), comparison.Error)
+		comparison.LighthouseQueued, comparison.LighthouseCompleted, comparison.LighthouseFailed, nullable(comparison.MigrationScore),
+		string(sourceDiscovery), string(edsDiscovery), comparison.Error)
 	return err
 }
 
@@ -348,19 +365,21 @@ func (s *SQLiteStore) UpdateComparison(comparison ComparisonSummary) error {
 	if !comparison.FinishedAt.IsZero() {
 		finished = comparison.FinishedAt.Format(time.RFC3339Nano)
 	}
+	sourceDiscovery, _ := json.Marshal(NormalizeDiscoveryReport(comparison.SourceDiscovery))
+	edsDiscovery, _ := json.Marshal(NormalizeDiscoveryReport(comparison.EDSDiscovery))
 	_, err := s.db.Exec(`
 UPDATE comparisons
 SET status = ?, phase = ?, finished_at = ?, source_pages = ?, eds_pages = ?, matched_pages = ?,
-    missing_in_eds = ?, extra_in_eds = ?, source_fetch_failures = ?, eds_fetch_failures = ?,
+    uncertain_matches = ?, missing_in_eds = ?, extra_in_eds = ?, source_fetch_failures = ?, eds_fetch_failures = ?,
     metadata_diffs = ?, link_diffs = ?, visual_queued = ?, visual_completed = ?, visual_failed = ?,
     visual_review = ?, visual_fail = ?, lighthouse_queued = ?, lighthouse_completed = ?, lighthouse_failed = ?,
-    migration_score = ?, error = ?
+    migration_score = ?, source_discovery_json = ?, eds_discovery_json = ?, error = ?
 WHERE id = ?`,
 		comparison.Status, comparison.Phase, finished, comparison.SourcePages, comparison.EDSPages, comparison.MatchedPages,
-		comparison.MissingInEDS, comparison.ExtraInEDS, comparison.SourceFetchFailures, comparison.EDSFetchFailures,
+		comparison.UncertainMatches, comparison.MissingInEDS, comparison.ExtraInEDS, comparison.SourceFetchFailures, comparison.EDSFetchFailures,
 		comparison.MetadataDiffs, comparison.LinkDiffs, comparison.VisualQueued, comparison.VisualCompleted, comparison.VisualFailed,
 		comparison.VisualReview, comparison.VisualFail, comparison.LighthouseQueued, comparison.LighthouseCompleted, comparison.LighthouseFailed,
-		nullable(comparison.MigrationScore), comparison.Error, comparison.ID)
+		nullable(comparison.MigrationScore), string(sourceDiscovery), string(edsDiscovery), comparison.Error, comparison.ID)
 	return err
 }
 
@@ -371,14 +390,20 @@ func (s *SQLiteStore) SaveComparedPage(comparisonID string, group string, page C
 	fields, _ := json.Marshal(page.FieldDiffs)
 	links, _ := json.Marshal(page.LinkDiffs)
 	issues, _ := json.Marshal(page.Issues)
+	sourceAliases, _ := json.Marshal(page.SourceAliases)
+	edsAliases, _ := json.Marshal(page.EDSAliases)
 	_, err := s.db.Exec(`
 INSERT INTO comparison_pages (
-  comparison_id, page_key, group_name, status, severity, source_json, eds_json, field_diffs_json, link_diffs_json, issues_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  comparison_id, page_key, group_name, status, severity, match_type, match_confidence, source_aliases_json, eds_aliases_json,
+  source_json, eds_json, field_diffs_json, link_diffs_json, issues_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(comparison_id, page_key, group_name) DO UPDATE SET
-  status=excluded.status, severity=excluded.severity, source_json=excluded.source_json, eds_json=excluded.eds_json,
+  status=excluded.status, severity=excluded.severity, match_type=excluded.match_type, match_confidence=excluded.match_confidence,
+  source_aliases_json=excluded.source_aliases_json, eds_aliases_json=excluded.eds_aliases_json,
+  source_json=excluded.source_json, eds_json=excluded.eds_json,
   field_diffs_json=excluded.field_diffs_json, link_diffs_json=excluded.link_diffs_json, issues_json=excluded.issues_json`,
-		comparisonID, page.Path, group, page.Status, page.Severity, string(source), string(eds), string(fields), string(links), string(issues))
+		comparisonID, page.Path, group, page.Status, page.Severity, page.MatchType, page.MatchConfidence, string(sourceAliases), string(edsAliases),
+		string(source), string(eds), string(fields), string(links), string(issues))
 	return err
 }
 
@@ -397,10 +422,10 @@ ON CONFLICT(comparison_id, page_key, viewport) DO UPDATE SET
 func (s *SQLiteStore) ListComparisons() ([]ComparisonSummary, error) {
 	rows, err := s.db.Query(`
 SELECT id, source_input_url, eds_input_url, source_root_url, eds_root_url, status, COALESCE(phase, ''),
-       started_at, COALESCE(finished_at, ''), source_pages, eds_pages, matched_pages, missing_in_eds, extra_in_eds,
+       started_at, COALESCE(finished_at, ''), source_pages, eds_pages, matched_pages, uncertain_matches, missing_in_eds, extra_in_eds,
        source_fetch_failures, eds_fetch_failures, metadata_diffs, link_diffs, visual_queued, visual_completed,
        visual_failed, visual_review, visual_fail, lighthouse_queued, lighthouse_completed, lighthouse_failed,
-       migration_score, COALESCE(error, '')
+       migration_score, COALESCE(source_discovery_json, '{}'), COALESCE(eds_discovery_json, '{}'), COALESCE(error, '')
 FROM comparisons ORDER BY started_at DESC LIMIT 50`)
 	if err != nil {
 		return nil, err
@@ -421,10 +446,10 @@ FROM comparisons ORDER BY started_at DESC LIMIT 50`)
 func (s *SQLiteStore) GetComparison(id string) (ComparisonResult, error) {
 	row := s.db.QueryRow(`
 SELECT id, source_input_url, eds_input_url, source_root_url, eds_root_url, status, COALESCE(phase, ''),
-       started_at, COALESCE(finished_at, ''), source_pages, eds_pages, matched_pages, missing_in_eds, extra_in_eds,
+       started_at, COALESCE(finished_at, ''), source_pages, eds_pages, matched_pages, uncertain_matches, missing_in_eds, extra_in_eds,
        source_fetch_failures, eds_fetch_failures, metadata_diffs, link_diffs, visual_queued, visual_completed,
        visual_failed, visual_review, visual_fail, lighthouse_queued, lighthouse_completed, lighthouse_failed,
-       migration_score, COALESCE(error, '')
+       migration_score, COALESCE(source_discovery_json, '{}'), COALESCE(eds_discovery_json, '{}'), COALESCE(error, '')
 FROM comparisons WHERE id = ?`, id)
 	summary, err := comparisonFromRows(row)
 	if err != nil {
@@ -432,7 +457,9 @@ FROM comparisons WHERE id = ?`, id)
 	}
 
 	rows, err := s.db.Query(`
-SELECT page_key, group_name, status, severity, source_json, eds_json, field_diffs_json, link_diffs_json, issues_json
+SELECT page_key, group_name, status, severity, COALESCE(match_type, ''), COALESCE(match_confidence, ''),
+       COALESCE(source_aliases_json, '[]'), COALESCE(eds_aliases_json, '[]'),
+       source_json, eds_json, field_diffs_json, link_diffs_json, issues_json
 FROM comparison_pages WHERE comparison_id = ? ORDER BY group_name, page_key`, id)
 	if err != nil {
 		return ComparisonResult{}, err
@@ -440,7 +467,9 @@ FROM comparison_pages WHERE comparison_id = ? ORDER BY group_name, page_key`, id
 
 	result := ComparisonResult{
 		Summary:             summary,
+		Discovery:           ComparisonDiscovery{Source: summary.SourceDiscovery, EDS: summary.EDSDiscovery},
 		Matched:             []ComparedPage{},
+		UncertainMatches:    []ComparedPage{},
 		MissingInEDS:        []PageResult{},
 		ExtraInEDS:          []PageResult{},
 		SourceFetchFailures: []PageResult{},
@@ -461,6 +490,10 @@ FROM comparison_pages WHERE comparison_id = ? ORDER BY group_name, page_key`, id
 		switch group {
 		case "matched":
 			result.Matched = append(result.Matched, page)
+			result.Links.MatchedPageDiffs += len(page.LinkDiffs)
+			edsPages = append(edsPages, page.EDS)
+		case "uncertainMatches":
+			result.UncertainMatches = append(result.UncertainMatches, page)
 			result.Links.MatchedPageDiffs += len(page.LinkDiffs)
 			edsPages = append(edsPages, page.EDS)
 		case "missingInEDS":
@@ -490,8 +523,14 @@ FROM comparison_pages WHERE comparison_id = ? ORDER BY group_name, page_key`, id
 		result.Matched[i].Visuals = visuals[result.Matched[i].Path]
 		result.Matched[i] = NormalizeComparedPage(result.Matched[i])
 	}
+	for i := range result.UncertainMatches {
+		result.UncertainMatches[i].Visuals = visuals[result.UncertainMatches[i].Path]
+		result.UncertainMatches[i] = NormalizeComparedPage(result.UncertainMatches[i])
+	}
 	result.Blocks, result.Sections, _, _ = aggregate(edsPages)
-	result.Links, result.SEO = aggregateComparison(result.Matched)
+	matchedForAggregation := append([]ComparedPage{}, result.Matched...)
+	matchedForAggregation = append(matchedForAggregation, result.UncertainMatches...)
+	result.Links, result.SEO = aggregateComparison(matchedForAggregation)
 	return NormalizeComparisonResult(result), nil
 }
 
@@ -552,14 +591,15 @@ func scanFromRows(row scannerRows) (ScanSummary, error) {
 
 func comparisonFromRows(row scannerRows) (ComparisonSummary, error) {
 	var comparison ComparisonSummary
-	var startedAt, finishedAt string
+	var startedAt, finishedAt, sourceDiscoveryJSON, edsDiscoveryJSON string
 	var score sql.NullFloat64
 	if err := row.Scan(&comparison.ID, &comparison.SourceInputURL, &comparison.EDSInputURL, &comparison.SourceRootURL, &comparison.EDSRootURL,
 		&comparison.Status, &comparison.Phase, &startedAt, &finishedAt, &comparison.SourcePages, &comparison.EDSPages,
-		&comparison.MatchedPages, &comparison.MissingInEDS, &comparison.ExtraInEDS, &comparison.SourceFetchFailures,
+		&comparison.MatchedPages, &comparison.UncertainMatches, &comparison.MissingInEDS, &comparison.ExtraInEDS, &comparison.SourceFetchFailures,
 		&comparison.EDSFetchFailures, &comparison.MetadataDiffs, &comparison.LinkDiffs, &comparison.VisualQueued,
 		&comparison.VisualCompleted, &comparison.VisualFailed, &comparison.VisualReview, &comparison.VisualFail,
-		&comparison.LighthouseQueued, &comparison.LighthouseCompleted, &comparison.LighthouseFailed, &score, &comparison.Error); err != nil {
+		&comparison.LighthouseQueued, &comparison.LighthouseCompleted, &comparison.LighthouseFailed, &score,
+		&sourceDiscoveryJSON, &edsDiscoveryJSON, &comparison.Error); err != nil {
 		return comparison, err
 	}
 	if comparison.Phase == "" {
@@ -570,14 +610,19 @@ func comparisonFromRows(row scannerRows) (ComparisonSummary, error) {
 		comparison.FinishedAt = parseTime(finishedAt)
 	}
 	comparison.MigrationScore = fromNull(score)
+	_ = json.Unmarshal([]byte(sourceDiscoveryJSON), &comparison.SourceDiscovery)
+	_ = json.Unmarshal([]byte(edsDiscoveryJSON), &comparison.EDSDiscovery)
+	comparison.SourceDiscovery = NormalizeDiscoveryReport(comparison.SourceDiscovery)
+	comparison.EDSDiscovery = NormalizeDiscoveryReport(comparison.EDSDiscovery)
 	return comparison, nil
 }
 
 func comparedPageFromRows(rows *sql.Rows) (ComparedPage, string, error) {
 	var page ComparedPage
 	var group string
-	var sourceJSON, edsJSON, fieldsJSON, linksJSON, issuesJSON string
-	if err := rows.Scan(&page.Path, &group, &page.Status, &page.Severity, &sourceJSON, &edsJSON, &fieldsJSON, &linksJSON, &issuesJSON); err != nil {
+	var sourceJSON, edsJSON, fieldsJSON, linksJSON, issuesJSON, sourceAliasesJSON, edsAliasesJSON string
+	if err := rows.Scan(&page.Path, &group, &page.Status, &page.Severity, &page.MatchType, &page.MatchConfidence,
+		&sourceAliasesJSON, &edsAliasesJSON, &sourceJSON, &edsJSON, &fieldsJSON, &linksJSON, &issuesJSON); err != nil {
 		return page, group, err
 	}
 	_ = json.Unmarshal([]byte(sourceJSON), &page.Source)
@@ -585,6 +630,8 @@ func comparedPageFromRows(rows *sql.Rows) (ComparedPage, string, error) {
 	_ = json.Unmarshal([]byte(fieldsJSON), &page.FieldDiffs)
 	_ = json.Unmarshal([]byte(linksJSON), &page.LinkDiffs)
 	_ = json.Unmarshal([]byte(issuesJSON), &page.Issues)
+	_ = json.Unmarshal([]byte(sourceAliasesJSON), &page.SourceAliases)
+	_ = json.Unmarshal([]byte(edsAliasesJSON), &page.EDSAliases)
 	return NormalizeComparedPage(page), group, nil
 }
 

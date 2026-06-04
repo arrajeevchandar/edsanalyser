@@ -93,7 +93,7 @@ describe('App', () => {
         '/api/comparisons',
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ sourceUrl: 'https://legacy.example.com', edsUrl: 'https://eds.example.com', crawlLimit: null }),
+          body: JSON.stringify({ sourceUrl: 'https://legacy.example.com', edsUrl: 'https://eds.example.com', crawlLimit: null, crawlMode: 'exhaustive', renderedDiscovery: 'auto' }),
         }),
       ),
     );
@@ -116,6 +116,11 @@ describe('App', () => {
     expect(await screen.findByText('Visual diff pending')).toBeInTheDocument();
     expect(screen.getByText('Legacy source')).toBeInTheDocument();
     expect(screen.getByText('Migrated EDS')).toBeInTheDocument();
+    expect(screen.getByText('Missing in EDS')).toBeInTheDocument();
+    expect(screen.getByText('Extra EDS')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Missing' }));
+    expect(await screen.findByText('EDS page missing.')).toBeInTheDocument();
   });
 
   it('runs Lighthouse for all pages from the overview button', async () => {
@@ -226,9 +231,10 @@ function comparisonSummary(id: string, overrides: Record<string, unknown> = {}) 
     sourcePages: 2,
     edsPages: 2,
     matchedPages: 1,
+    uncertainMatches: 1,
     missingInEDS: 1,
-    extraInEDS: 0,
-    sourceFetchFailures: 0,
+    extraInEDS: 1,
+    sourceFetchFailures: 1,
     edsFetchFailures: 0,
     metadataDiffs: 1,
     linkDiffs: 0,
@@ -248,10 +254,18 @@ function comparisonSummary(id: string, overrides: Record<string, unknown> = {}) 
 function comparisonResult(summary: ReturnType<typeof comparisonSummary>) {
   return {
     summary,
+    discovery: {
+      source: discoveryReport({ totalQueued: 5, totalAnalyzed: 4, fromSitemap: 2, fromStaticLinks: 2 }),
+      eds: discoveryReport({ totalQueued: 5, totalAnalyzed: 4, fromQueryIndex: 2, fromRenderedLinks: 1, warnings: ['Rendered discovery was used because static discovery only found one page.'] }),
+    },
     matched: [{
       path: '/',
       status: 'review',
       severity: 2,
+      matchType: 'exact',
+      matchConfidence: 'high',
+      sourceAliases: ['exact:/'],
+      edsAliases: ['exact:/'],
       source: pageResult('https://legacy.example.com/', { title: 'Legacy Home', h1: 'Legacy Home' }),
       eds: pageResult('https://eds.example.com/', { title: 'EDS Home', h1: 'EDS Home', blockCount: 2, sectionCount: 1 }),
       fieldDiffs: [{ field: 'title', source: 'Legacy Home', eds: 'EDS Home', status: 'review' }],
@@ -259,15 +273,49 @@ function comparisonResult(summary: ReturnType<typeof comparisonSummary>) {
       visuals: null,
       issues: ['Title changed'],
     }],
+    uncertainMatches: [{
+      path: '/alias',
+      status: 'review',
+      severity: 1,
+      matchType: 'canonical',
+      matchConfidence: 'medium',
+      sourceAliases: ['exact:/alias'],
+      edsAliases: ['canonical:/alias'],
+      source: pageResult('https://legacy.example.com/alias', { title: 'Alias' }),
+      eds: pageResult('https://eds.example.com/new-alias', { title: 'Alias', canonical: 'https://eds.example.com/alias' }),
+      fieldDiffs: [],
+      linkDiffs: [],
+      visuals: [],
+      issues: ['Matched by canonical alias; verify this page pair.'],
+    }],
     missingInEDS: [pageResult('https://legacy.example.com/missing')],
-    extraInEDS: [],
-    sourceFetchFailures: [],
+    extraInEDS: [pageResult('https://eds.example.com/extra')],
+    sourceFetchFailures: [pageResult('https://legacy.example.com/broken', { fetchError: 'HTTP 500', statusCode: 500 })],
     edsFetchFailures: [],
     blocks: [],
     sections: [],
     links: null,
     seo: null,
     generatedAt: new Date().toISOString(),
+  };
+}
+
+function discoveryReport(overrides: Record<string, unknown> = {}) {
+  return {
+    rootUrl: 'https://example.com/',
+    totalQueued: 0,
+    totalAnalyzed: 0,
+    fromSitemap: 0,
+    fromRobots: 0,
+    fromQueryIndex: 0,
+    fromStaticLinks: 0,
+    fromRenderedLinks: 0,
+    duplicates: 0,
+    skippedAssets: 0,
+    skippedExternal: 0,
+    limitHit: false,
+    warnings: [],
+    ...overrides,
   };
 }
 

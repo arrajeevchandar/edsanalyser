@@ -42,6 +42,7 @@ import type {
   ComparedPage,
   ComparisonResult,
   ComparisonSummary,
+  FieldDiff,
   PageResult,
   ScanEvent,
   ScanResult,
@@ -53,6 +54,26 @@ import type {
 type Mode = 'compare' | 'scan';
 type Tab = 'overview' | 'pages' | 'blocks' | 'links' | 'seo' | 'history';
 type CompareTab = 'overview' | 'pages' | 'visual' | 'blocks' | 'links' | 'seo' | 'history';
+type CompareGroupFilter = 'all' | 'matched' | 'missing' | 'extra' | 'source-failed' | 'eds-failed' | 'uncertain';
+type ComparisonPageGroup = Exclude<CompareGroupFilter, 'all'>;
+
+interface ComparisonPageRow {
+  id: string;
+  group: ComparisonPageGroup;
+  path: string;
+  status: string;
+  severity: number;
+  source?: PageResult;
+  eds?: PageResult;
+  fieldDiffs: FieldDiff[];
+  linkDiffs: FieldDiff[];
+  visuals: VisualDiff[];
+  issues: string[];
+  matchType: string;
+  matchConfidence: string;
+  sourceAliases: string[];
+  edsAliases: string[];
+}
 
 const tabs: Array<{ id: Tab; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: 'Overview', icon: Activity },
@@ -73,6 +94,16 @@ const compareTabs: Array<{ id: CompareTab; label: string; icon: typeof Activity 
   { id: 'history', label: 'History', icon: History },
 ];
 
+const compareGroupOptions: Array<{ id: CompareGroupFilter; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'matched', label: 'Matched' },
+  { id: 'uncertain', label: 'Uncertain' },
+  { id: 'missing', label: 'Missing' },
+  { id: 'extra', label: 'Extra' },
+  { id: 'source-failed', label: 'Source fail' },
+  { id: 'eds-failed', label: 'EDS fail' },
+];
+
 export default function App() {
   const [mode, setMode] = useState<Mode>('compare');
   const [url, setUrl] = useState('');
@@ -88,8 +119,9 @@ export default function App() {
   const [compareTab, setCompareTab] = useState<CompareTab>('overview');
   const [pageFilter, setPageFilter] = useState('');
   const [compareFilter, setCompareFilter] = useState('');
+  const [compareGroupFilter, setCompareGroupFilter] = useState<CompareGroupFilter>('all');
   const [selectedPageURL, setSelectedPageURL] = useState<string | null>(null);
-  const [selectedComparePath, setSelectedComparePath] = useState<string | null>(null);
+  const [selectedCompareID, setSelectedCompareID] = useState<string | null>(null);
   const [visualViewport, setVisualViewport] = useState<'desktop' | 'mobile'>('desktop');
   const [events, setEvents] = useState<ScanEvent[]>([]);
   const [comparisonEvents, setComparisonEvents] = useState<ScanEvent[]>([]);
@@ -204,27 +236,39 @@ export default function App() {
     );
   }, [scan, pageFilter]);
 
-  const selectedComparedPage = useMemo(() => {
-    if (!comparison?.matched.length) {
+  const comparisonRows = useMemo(() => buildComparisonRows(comparison), [comparison]);
+
+  const selectedComparisonRow = useMemo(() => {
+    if (!comparisonRows.length) {
       return null;
     }
-    return comparison.matched.find((page) => page.path === selectedComparePath) || comparison.matched[0];
-  }, [comparison, selectedComparePath]);
+    return comparisonRows.find((row) => row.id === selectedCompareID) || preferredComparisonRow(comparisonRows) || comparisonRows[0];
+  }, [comparisonRows, selectedCompareID]);
 
-  const filteredComparedPages = useMemo(() => {
+  const filteredComparisonRows = useMemo(() => {
     const value = compareFilter.trim().toLowerCase();
-    if (!comparison) {
-      return [];
-    }
-    if (!value) {
-      return comparison.matched;
-    }
-    return comparison.matched.filter((page) =>
-      [page.path, page.status, page.source.title, page.eds.title, ...page.issues]
+    return comparisonRows.filter((row) => {
+      if (compareGroupFilter !== 'all' && row.group !== compareGroupFilter) {
+        return false;
+      }
+      if (!value) {
+        return true;
+      }
+      return [
+        row.path,
+        row.status,
+        row.group,
+        row.matchType,
+        row.source?.title,
+        row.eds?.title,
+        row.source?.url,
+        row.eds?.url,
+        ...row.issues,
+      ]
         .filter((item): item is string => Boolean(item))
-        .some((item) => item.toLowerCase().includes(value)),
-    );
-  }, [comparison, compareFilter]);
+        .some((item) => item.toLowerCase().includes(value));
+    });
+  }, [comparisonRows, compareFilter, compareGroupFilter]);
 
   async function refreshHistory() {
     try {
@@ -252,7 +296,8 @@ export default function App() {
       const result = await getComparison(id);
       setComparison(result);
       setActiveComparison(result.summary);
-      setSelectedComparePath((current) => current || result.matched[0]?.path || null);
+      const rows = buildComparisonRows(result);
+      setSelectedCompareID((current) => current || preferredComparisonRow(rows)?.id || rows[0]?.id || null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load comparison');
     }
@@ -292,7 +337,9 @@ export default function App() {
       setActiveComparison(created);
       setComparison({
         summary: created,
+        discovery: emptyComparisonDiscovery,
         matched: [],
+        uncertainMatches: [],
         missingInEDS: [],
         extraInEDS: [],
         sourceFetchFailures: [],
@@ -303,7 +350,8 @@ export default function App() {
         seo: emptyComparisonSEO,
         generatedAt: new Date().toISOString(),
       });
-      setSelectedComparePath(null);
+      setSelectedCompareID(null);
+      setCompareGroupFilter('all');
       setCompareTab('overview');
       setMode('compare');
       await refreshHistory();
@@ -342,6 +390,12 @@ export default function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to start Lighthouse run');
     }
+  }
+
+  function onCompareGroupFilter(value: CompareGroupFilter) {
+    setCompareGroupFilter(value);
+    const next = value === 'all' ? preferredComparisonRow(comparisonRows) || comparisonRows[0] : comparisonRows.find((row) => row.group === value);
+    setSelectedCompareID(next?.id || null);
   }
 
   const summary = scan?.summary || activeScan;
@@ -527,12 +581,14 @@ export default function App() {
             tab={compareTab}
             events={comparisonEvents}
             error={error}
-            selectedPage={selectedComparedPage}
-            pages={filteredComparedPages}
+            selectedRow={selectedComparisonRow}
+            rows={filteredComparisonRows}
             pageFilter={compareFilter}
+            groupFilter={compareGroupFilter}
             visualViewport={visualViewport}
             onFilter={setCompareFilter}
-            onSelect={setSelectedComparePath}
+            onGroupFilter={onCompareGroupFilter}
+            onSelect={setSelectedCompareID}
             onOpen={(id) => void loadComparison(id)}
             onViewport={setVisualViewport}
           />
@@ -575,11 +631,13 @@ function CompareDashboard({
   tab,
   events,
   error,
-  selectedPage,
-  pages,
+  selectedRow,
+  rows,
   pageFilter,
+  groupFilter,
   visualViewport,
   onFilter,
+  onGroupFilter,
   onSelect,
   onOpen,
   onViewport,
@@ -591,11 +649,13 @@ function CompareDashboard({
   tab: CompareTab;
   events: ScanEvent[];
   error: string;
-  selectedPage: ComparedPage | null;
-  pages: ComparedPage[];
+  selectedRow: ComparisonPageRow | null;
+  rows: ComparisonPageRow[];
   pageFilter: string;
+  groupFilter: CompareGroupFilter;
   visualViewport: 'desktop' | 'mobile';
   onFilter: (value: string) => void;
+  onGroupFilter: (value: CompareGroupFilter) => void;
   onSelect: (value: string) => void;
   onOpen: (id: string) => void;
   onViewport: (value: 'desktop' | 'mobile') => void;
@@ -656,16 +716,18 @@ function CompareDashboard({
       {comparison && tab === 'pages' && (
         <ComparisonPagesView
           comparison={comparison}
-          pages={pages}
-          selectedPage={selectedPage}
+          rows={rows}
+          selectedRow={selectedRow}
           pageFilter={pageFilter}
+          groupFilter={groupFilter}
           onFilter={onFilter}
+          onGroupFilter={onGroupFilter}
           onSelect={onSelect}
           visualViewport={visualViewport}
           onViewport={onViewport}
         />
       )}
-      {comparison && tab === 'visual' && <ComparisonVisualView pages={comparison.matched} viewport={visualViewport} onViewport={onViewport} />}
+      {comparison && tab === 'visual' && <ComparisonVisualView pages={[...comparison.matched, ...comparison.uncertainMatches]} viewport={visualViewport} onViewport={onViewport} />}
       {comparison && tab === 'blocks' && <ComparisonBlocksView comparison={comparison} />}
       {comparison && tab === 'links' && <ComparisonLinksView comparison={comparison} />}
       {comparison && tab === 'seo' && <ComparisonSEOView comparison={comparison} />}
@@ -707,10 +769,11 @@ function CompareEmptyState({ history, onOpen }: { history: ComparisonSummary[]; 
 
 function ComparisonOverview({ comparison }: { comparison: ComparisonResult }) {
   const summary = comparison.summary;
-  const issuePages = comparison.matched.filter((page) => page.status !== 'pass').length;
-  const zeroBlockPages = comparison.matched.filter((page) => page.eds.blockCount === 0).length;
+  const pairedPages = [...comparison.matched, ...comparison.uncertainMatches];
+  const issuePages = pairedPages.filter((page) => page.status !== 'pass').length;
+  const zeroBlockPages = pairedPages.filter((page) => page.eds.blockCount === 0).length;
   const cards = [
-    { label: 'Matched paths', value: summary.matchedPages.toString(), detail: `${summary.sourcePages} source, ${summary.edsPages} EDS`, tone: 'good' as const, icon: <Route size={18} /> },
+    { label: 'Matched paths', value: summary.matchedPages.toString(), detail: `${summary.uncertainMatches} uncertain aliases`, tone: 'good' as const, icon: <Route size={18} /> },
     { label: 'Missing in EDS', value: summary.missingInEDS.toString(), detail: 'Legacy pages without migrated match', tone: summary.missingInEDS ? 'bad' as const : 'good' as const, icon: <OctagonX size={18} /> },
     { label: 'Page issues', value: issuePages.toString(), detail: 'Matched pages needing review', tone: issuePages ? 'warn' as const : 'good' as const, icon: <AlertCircle size={18} /> },
     { label: 'Visual failures', value: summary.visualFail.toString(), detail: `${summary.visualReview} visual reviews`, tone: summary.visualFail ? 'bad' as const : summary.visualReview ? 'warn' as const : 'good' as const, icon: <PanelTop size={18} /> },
@@ -742,10 +805,13 @@ function ComparisonOverview({ comparison }: { comparison: ComparisonResult }) {
           <div className="mini-grid">
             <Metric label="Source pages" value={summary.sourcePages.toString()} />
             <Metric label="EDS pages" value={summary.edsPages.toString()} />
+            <Metric label="Uncertain" value={summary.uncertainMatches.toString()} tone={summary.uncertainMatches ? 'warn' : 'good'} />
             <Metric label="Extra EDS" value={summary.extraInEDS.toString()} tone={summary.extraInEDS ? 'warn' : 'good'} />
             <Metric label="Fetch failures" value={(summary.sourceFetchFailures + summary.edsFetchFailures).toString()} tone={summary.sourceFetchFailures + summary.edsFetchFailures ? 'bad' : 'good'} />
           </div>
         </div>
+        <DiscoveryPanel title="Legacy discovery" report={comparison.discovery.source} />
+        <DiscoveryPanel title="EDS discovery" report={comparison.discovery.eds} />
         <div className="panel">
           <div className="panel-heading"><h2>Visual checks</h2><PanelTop size={19} /></div>
           <div className="mini-grid">
@@ -768,98 +834,150 @@ function ComparisonOverview({ comparison }: { comparison: ComparisonResult }) {
   );
 }
 
+function DiscoveryPanel({ title, report }: { title: string; report: ComparisonResult['discovery']['source'] }) {
+  const warning = report.limitHit || report.totalAnalyzed <= 1 || report.warnings.length > 0;
+  return (
+    <div className="panel discovery-panel">
+      <div className="panel-heading"><h2>{title}</h2><FileSearch size={19} /></div>
+      <div className="mini-grid">
+        <Metric label="Queued" value={report.totalQueued.toString()} />
+        <Metric label="Analyzed" value={report.totalAnalyzed.toString()} tone={report.totalAnalyzed <= 1 ? 'warn' : 'good'} />
+        <Metric label="Sitemaps" value={(report.fromSitemap + report.fromRobots).toString()} />
+        <Metric label="Query index" value={report.fromQueryIndex.toString()} />
+        <Metric label="Static links" value={report.fromStaticLinks.toString()} />
+        <Metric label="Rendered" value={report.fromRenderedLinks.toString()} tone={report.fromRenderedLinks ? 'warn' : 'muted'} />
+      </div>
+      {warning && (
+        <div className="issue-stack tight">
+          {report.limitHit && <IssueItem label="Crawl limit hit" detail="The crawler stopped before queuing every discovered URL." tone="warn" />}
+          {report.totalAnalyzed <= 1 && <IssueItem label="Only one page discovered" detail="Sitemap, query-index, static links, and rendered links exposed no additional pages." tone="warn" />}
+          {report.warnings.slice(0, 3).map((item) => <IssueItem key={item} label="Discovery note" detail={item} tone="muted" />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ComparisonPagesView({
   comparison,
-  pages,
-  selectedPage,
+  rows,
+  selectedRow,
   pageFilter,
+  groupFilter,
   onFilter,
+  onGroupFilter,
   onSelect,
   visualViewport,
   onViewport,
 }: {
   comparison: ComparisonResult;
-  pages: ComparedPage[];
-  selectedPage: ComparedPage | null;
+  rows: ComparisonPageRow[];
+  selectedRow: ComparisonPageRow | null;
   pageFilter: string;
+  groupFilter: CompareGroupFilter;
   onFilter: (value: string) => void;
+  onGroupFilter: (value: CompareGroupFilter) => void;
   onSelect: (value: string) => void;
   visualViewport: 'desktop' | 'mobile';
   onViewport: (value: 'desktop' | 'mobile') => void;
 }) {
+  const matchedPairs = [...comparison.matched, ...comparison.uncertainMatches];
   return (
     <section className="page-workspace">
       <div className="section-toolbar">
         <div>
-          <p className="eyebrow">Matched pages</p>
-          <h2>Review migration parity by path</h2>
+          <p className="eyebrow">Page coverage</p>
+          <h2>Review every matched and unmatched path</h2>
         </div>
         <div className="search-field">
           <Search size={16} />
           <input value={pageFilter} onChange={(event) => onFilter(event.target.value)} placeholder="Filter compared pages" />
         </div>
       </div>
+      <div className="segmented-control compare-filter-control">
+        {compareGroupOptions.map((item) => (
+          <button key={item.id} type="button" className={groupFilter === item.id ? 'active' : ''} onClick={() => onGroupFilter(item.id)}>
+            {item.label}
+          </button>
+        ))}
+      </div>
       <div className="summary-ribbon">
         <Metric label="Matched" value={comparison.summary.matchedPages.toString()} />
+        <Metric label="Uncertain" value={comparison.summary.uncertainMatches.toString()} tone={comparison.summary.uncertainMatches ? 'warn' : 'good'} />
         <Metric label="Missing" value={comparison.summary.missingInEDS.toString()} tone={comparison.summary.missingInEDS ? 'bad' : 'good'} />
         <Metric label="Extra" value={comparison.summary.extraInEDS.toString()} tone={comparison.summary.extraInEDS ? 'warn' : 'good'} />
-        <Metric label="Reviews" value={comparison.matched.filter((page) => page.status === 'review').length.toString()} />
-        <Metric label="Fails" value={comparison.matched.filter((page) => page.status === 'fail').length.toString()} tone={comparison.matched.some((page) => page.status === 'fail') ? 'bad' : 'good'} />
+        <Metric label="Reviews" value={matchedPairs.filter((page) => page.status === 'review').length.toString()} />
+        <Metric label="Fails" value={matchedPairs.filter((page) => page.status === 'fail').length.toString()} tone={matchedPairs.some((page) => page.status === 'fail') ? 'bad' : 'good'} />
       </div>
       <section className="pages-layout">
         <div className="panel table-panel">
-          <div className="panel-heading"><h2>Matched paths</h2><span className="panel-count">{pages.length} shown</span></div>
+          <div className="panel-heading"><h2>Compared paths</h2><span className="panel-count">{rows.length} shown</span></div>
           <div className="table-scroll page-table-scroll">
             <table>
-              <thead><tr><th>Path</th><th>Status</th><th>Fields</th><th>Links</th><th>Visual</th></tr></thead>
+              <thead><tr><th>Path</th><th>Group</th><th>Status</th><th>Match</th><th>Issues</th></tr></thead>
               <tbody>
-                {pages.map((page) => (
-                  <tr key={page.path} onClick={() => onSelect(page.path)} className={selectedPage?.path === page.path ? 'selected' : ''}>
-                    <td><span className="url-cell">{page.path}</span></td>
-                    <td><span className={`audit-status ${page.status}`}>{page.status}</span></td>
-                    <td>{page.fieldDiffs.length}</td>
-                    <td>{page.linkDiffs.length}</td>
-                    <td>{visualSummary(page.visuals)}</td>
+                {rows.map((row) => (
+                  <tr key={row.id} onClick={() => onSelect(row.id)} className={selectedRow?.id === row.id ? 'selected' : ''}>
+                    <td><span className="url-cell">{row.path}</span></td>
+                    <td><span className={`link-kind ${row.group}`}>{groupLabel(row.group)}</span></td>
+                    <td><span className={`audit-status ${row.status}`}>{row.status}</span></td>
+                    <td>{row.matchType} / {row.matchConfidence}</td>
+                    <td>{row.fieldDiffs.length + row.linkDiffs.length + row.issues.length}</td>
                   </tr>
                 ))}
-                {pages.length === 0 && <EmptyTableRow columns={5} message="No matched pages yet" />}
+                {rows.length === 0 && <EmptyTableRow columns={5} message="No pages in this group yet" />}
               </tbody>
             </table>
           </div>
         </div>
-        <ComparedPageDetail page={selectedPage} viewport={visualViewport} onViewport={onViewport} />
+        <ComparedPageDetail row={selectedRow} viewport={visualViewport} onViewport={onViewport} />
       </section>
     </section>
   );
 }
 
-function ComparedPageDetail({ page, viewport, onViewport }: { page: ComparedPage | null; viewport: 'desktop' | 'mobile'; onViewport: (value: 'desktop' | 'mobile') => void }) {
-  if (!page) {
-    return <div className="panel detail-panel page-inspector"><h2>Page detail</h2><EmptyInline message="Select a matched page to inspect migration differences." /></div>;
+function ComparedPageDetail({ row, viewport, onViewport }: { row: ComparisonPageRow | null; viewport: 'desktop' | 'mobile'; onViewport: (value: 'desktop' | 'mobile') => void }) {
+  if (!row) {
+    return <div className="panel detail-panel page-inspector"><h2>Page detail</h2><EmptyInline message="Select a page to inspect migration differences." /></div>;
   }
-  const visual = page.visuals.find((item) => item.viewport === viewport);
+  const visual = row.visuals.find((item) => item.viewport === viewport);
+  const canCompare = Boolean(row.source && row.eds);
   return (
     <div className="panel detail-panel page-inspector compare-inspector">
       <div className="inspector-head">
         <div>
-          <p className="eyebrow">Compared path</p>
-          <h2>{page.path}</h2>
-          <span>{page.source.title || 'Source title missing'} to {page.eds.title || 'EDS title missing'}</span>
+          <p className="eyebrow">{groupLabel(row.group)}</p>
+          <h2>{row.path}</h2>
+          <span>{row.matchType} match / {row.matchConfidence} confidence</span>
         </div>
-        <span className={`audit-status ${page.status}`}>{page.status}</span>
+        <span className={`audit-status ${row.status}`}>{row.status}</span>
       </div>
       <div className="compare-columns">
-        <SideBySideMeta title="Legacy source" page={page.source} />
-        <SideBySideMeta title="Migrated EDS" page={page.eds} />
+        {row.source ? <SideBySideMeta title="Legacy source" page={row.source} /> : <MissingSide title="Legacy source" message="Not found in source crawl." />}
+        {row.eds ? <SideBySideMeta title="Migrated EDS" page={row.eds} /> : <MissingSide title="Migrated EDS" message="EDS page missing." />}
       </div>
       <div className="issue-stack tight">
-        {[...page.issues, ...page.fieldDiffs.map((diff) => `${diff.field}: ${diff.source || 'missing'} -> ${diff.eds || 'missing'}`), ...page.linkDiffs.map((diff) => diff.field)].slice(0, 8).map((issue) => (
+        {[...row.issues, ...row.fieldDiffs.map((diff) => `${diff.field}: ${diff.source || 'missing'} -> ${diff.eds || 'missing'}`), ...row.linkDiffs.map((diff) => diff.field)].slice(0, 8).map((issue) => (
           <IssueItem key={issue} label={issue} detail="Review this page before launch." tone="warn" />
         ))}
-        {page.issues.length === 0 && page.fieldDiffs.length === 0 && page.linkDiffs.length === 0 && <IssueItem label="Page parity looks good" detail="No source/EDS metadata or link differences detected." tone="good" />}
+        {!canCompare && <IssueItem label={row.group === 'missing' ? 'EDS page missing' : row.group === 'extra' ? 'Extra EDS page' : 'Fetch failed'} detail="This row cannot be compared side-by-side until both pages fetch successfully." tone={row.group === 'extra' ? 'warn' : 'bad'} />}
+        {row.issues.length === 0 && row.fieldDiffs.length === 0 && row.linkDiffs.length === 0 && canCompare && <IssueItem label="Page parity looks good" detail="No source/EDS metadata or link differences detected." tone="good" />}
       </div>
-      <VisualToggle viewport={viewport} onViewport={onViewport} />
-      <VisualPreview visual={visual} />
+      {canCompare && (
+        <>
+          <VisualToggle viewport={viewport} onViewport={onViewport} />
+          <VisualPreview visual={visual} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function MissingSide({ title, message }: { title: string; message: string }) {
+  return (
+    <div className="compare-meta-panel missing-side">
+      <h3>{title}</h3>
+      <EmptyInline message={message} />
     </div>
   );
 }
@@ -929,7 +1047,7 @@ function VisualPreview({ visual }: { visual?: VisualDiff }) {
 }
 
 function ComparisonBlocksView({ comparison }: { comparison: ComparisonResult }) {
-  const zeroBlockPages = comparison.matched.filter((page) => page.eds.blockCount === 0);
+  const zeroBlockPages = [...comparison.matched, ...comparison.uncertainMatches].filter((page) => page.eds.blockCount === 0);
   return (
     <section className="page-workspace">
       <div className="summary-ribbon">
@@ -951,7 +1069,7 @@ function ComparisonBlocksView({ comparison }: { comparison: ComparisonResult }) 
 }
 
 function ComparisonLinksView({ comparison }: { comparison: ComparisonResult }) {
-  const diffs = comparison.matched.flatMap((page) => page.linkDiffs.map((diff) => ({ page: page.path, diff })));
+  const diffs = [...comparison.matched, ...comparison.uncertainMatches].flatMap((page) => page.linkDiffs.map((diff) => ({ page: page.path, diff })));
   return (
     <section className="page-workspace">
       <div className="summary-ribbon">
@@ -967,7 +1085,7 @@ function ComparisonLinksView({ comparison }: { comparison: ComparisonResult }) {
 }
 
 function ComparisonSEOView({ comparison }: { comparison: ComparisonResult }) {
-  const rows = comparison.matched.flatMap((page) => page.fieldDiffs.map((diff) => ({ page: page.path, field: diff.field, source: diff.source, eds: diff.eds })));
+  const rows = [...comparison.matched, ...comparison.uncertainMatches].flatMap((page) => page.fieldDiffs.map((diff) => ({ page: page.path, field: diff.field, source: diff.source, eds: diff.eds })));
   return (
     <section className="page-workspace">
       <div className="summary-ribbon">
@@ -1855,6 +1973,110 @@ function ScoreBadge({ score }: { score: number | null }) {
   return <span className={`score-badge ${scoreTone(score)}`}>{formatScore(score)}</span>;
 }
 
+function buildComparisonRows(comparison: ComparisonResult | null): ComparisonPageRow[] {
+  if (!comparison) {
+    return [];
+  }
+  const rows: ComparisonPageRow[] = [];
+  const addCompared = (group: ComparisonPageGroup, page: ComparedPage) => {
+    rows.push({
+      id: `${group}:${page.path}`,
+      group,
+      path: page.path,
+      status: page.status || 'pass',
+      severity: page.severity || 0,
+      source: page.source,
+      eds: page.eds,
+      fieldDiffs: page.fieldDiffs || [],
+      linkDiffs: page.linkDiffs || [],
+      visuals: page.visuals || [],
+      issues: page.issues || [],
+      matchType: page.matchType || 'exact',
+      matchConfidence: page.matchConfidence || 'high',
+      sourceAliases: page.sourceAliases || [],
+      edsAliases: page.edsAliases || [],
+    });
+  };
+  comparison.matched.forEach((page) => addCompared('matched', page));
+  comparison.uncertainMatches.forEach((page) => addCompared('uncertain', page));
+  comparison.missingInEDS.forEach((page) => rows.push(pageOnlyRow('missing', page, undefined, 'fail', ['Missing in migrated EDS site'])));
+  comparison.extraInEDS.forEach((page) => rows.push(pageOnlyRow('extra', undefined, page, 'review', ['Extra page in migrated EDS site'])));
+  comparison.sourceFetchFailures.forEach((page) => rows.push(pageOnlyRow('source-failed', page, undefined, 'fail', [page.fetchError || 'Source page failed to fetch'])));
+  comparison.edsFetchFailures.forEach((page) => rows.push(pageOnlyRow('eds-failed', undefined, page, 'fail', [page.fetchError || 'EDS page failed to fetch'])));
+  return rows.sort((a, b) => {
+    if (a.group !== b.group) {
+      return groupSort(a.group) - groupSort(b.group);
+    }
+    if (a.severity !== b.severity) {
+      return b.severity - a.severity;
+    }
+    return a.path.localeCompare(b.path);
+  });
+}
+
+function pageOnlyRow(group: ComparisonPageGroup, source: PageResult | undefined, eds: PageResult | undefined, status: string, issues: string[]): ComparisonPageRow {
+  const page = source || eds;
+  const path = page ? comparisonPathFromURL(page.url) : '/';
+  return {
+    id: `${group}:${path}`,
+    group,
+    path,
+    status,
+    severity: status === 'fail' ? 10 : 4,
+    source,
+    eds,
+    fieldDiffs: [],
+    linkDiffs: [],
+    visuals: [],
+    issues,
+    matchType: 'unmatched',
+    matchConfidence: 'low',
+    sourceAliases: [],
+    edsAliases: [],
+  };
+}
+
+function preferredComparisonRow(rows: ComparisonPageRow[]) {
+  return rows.find((row) => row.group === 'matched') || rows.find((row) => row.group === 'uncertain');
+}
+
+function comparisonPathFromURL(raw: string) {
+  try {
+    const parsed = new URL(raw);
+    let path = parsed.pathname || '/';
+    path = path.replace(/\/+$/, '') || '/';
+    const lower = path.toLowerCase();
+    if (lower === '/index' || lower === '/index.html') {
+      return '/';
+    }
+    return lower.replace(/\/index(\.html)?$/, '') || '/';
+  } catch {
+    return raw || '/';
+  }
+}
+
+function groupSort(group: ComparisonPageGroup) {
+  return {
+    missing: 0,
+    'source-failed': 1,
+    'eds-failed': 2,
+    uncertain: 3,
+    matched: 4,
+    extra: 5,
+  }[group];
+}
+
+function groupLabel(group: ComparisonPageGroup) {
+  return {
+    matched: 'Matched',
+    uncertain: 'Uncertain',
+    missing: 'Missing in EDS',
+    extra: 'Extra EDS',
+    'source-failed': 'Source failed',
+    'eds-failed': 'EDS failed',
+  }[group];
+}
+
 function comparisonReadout(comparison: ComparisonResult) {
   const summary = comparison.summary;
   if (summary.status === 'running') {
@@ -1862,6 +2084,9 @@ function comparisonReadout(comparison: ComparisonResult) {
   }
   if (summary.missingInEDS > 0) {
     return `${summary.missingInEDS} legacy pages are missing from the migrated EDS site.`;
+  }
+  if (summary.uncertainMatches > 0) {
+    return `${summary.uncertainMatches} pages matched through canonical or OG aliases and need confirmation.`;
   }
   if (summary.visualFail > 0) {
     return `${summary.visualFail} visual comparisons failed and should be reviewed first.`;
@@ -2077,3 +2302,19 @@ const emptyComparisonLinks = {
   matchedPageDiffs: 0,
 };
 const emptyComparisonSEO = { metadataDiffs: 0, titleDiffs: 0, h1Diffs: 0, descriptionDiffs: 0, ogDiffs: 0 };
+const emptyDiscoveryReport = {
+  rootUrl: '',
+  totalQueued: 0,
+  totalAnalyzed: 0,
+  fromSitemap: 0,
+  fromRobots: 0,
+  fromQueryIndex: 0,
+  fromStaticLinks: 0,
+  fromRenderedLinks: 0,
+  duplicates: 0,
+  skippedAssets: 0,
+  skippedExternal: 0,
+  limitHit: false,
+  warnings: [],
+};
+const emptyComparisonDiscovery = { source: emptyDiscoveryReport, eds: emptyDiscoveryReport };

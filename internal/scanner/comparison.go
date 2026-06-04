@@ -10,13 +10,29 @@ import (
 )
 
 type ComparisonOptions struct {
-	CrawlLimit      *int
-	LighthouseMode  string
-	LighthouseLimit int
+	CrawlLimit        *int
+	CrawlMode         string
+	RenderedDiscovery string
+	LighthouseMode    string
+	LighthouseLimit   int
+}
+
+type comparisonCrawlResult struct {
+	Pages     []PageResult
+	Discovery DiscoveryReport
+}
+
+type comparisonPageGroups struct {
+	Matched             []ComparedPage
+	UncertainMatches    []ComparedPage
+	MissingInEDS        []PageResult
+	ExtraInEDS          []PageResult
+	SourceFetchFailures []PageResult
+	EDSFetchFailures    []PageResult
 }
 
 func DefaultComparisonOptions() ComparisonOptions {
-	return ComparisonOptions{LighthouseMode: "top", LighthouseLimit: 5}
+	return ComparisonOptions{CrawlMode: "exhaustive", RenderedDiscovery: "auto", LighthouseMode: "top", LighthouseLimit: 5}
 }
 
 func (s *Service) StartComparison(parent context.Context, sourceInput string, edsInput string, opts ComparisonOptions) (ComparisonSummary, error) {
@@ -37,6 +53,12 @@ func (s *Service) StartComparison(parent context.Context, sourceInput string, ed
 	}
 	if opts.CrawlLimit != nil && *opts.CrawlLimit <= 0 {
 		opts.CrawlLimit = nil
+	}
+	if opts.CrawlMode == "" {
+		opts.CrawlMode = "exhaustive"
+	}
+	if opts.RenderedDiscovery == "" {
+		opts.RenderedDiscovery = "auto"
 	}
 	if opts.LighthouseMode == "" {
 		opts.LighthouseMode = "top"
@@ -98,53 +120,62 @@ func (s *Service) runComparison(ctx context.Context, comparison ComparisonSummar
 	}()
 
 	s.publish(Event{Type: "start", ScanID: comparison.ID, Message: "Comparison started"})
-	sourcePages := s.crawlForComparison(ctx, comparison.ID, "source", sourceRoot, opts)
+	sourceCrawl := s.crawlForComparison(ctx, comparison.ID, "source", sourceRoot, opts)
 	if ctx.Err() != nil {
 		s.cancelComparison(comparison)
 		return
 	}
+	sourcePages := sourceCrawl.Pages
+	comparison.SourceDiscovery = sourceCrawl.Discovery
 	comparison.SourcePages = len(sourcePages)
 	comparison.SourceFetchFailures = countFetchFailures(sourcePages)
 	comparison.Phase = "eds-crawl"
 	_ = s.store.UpdateComparison(comparison)
 
-	edsPages := s.crawlForComparison(ctx, comparison.ID, "eds", edsRoot, opts)
+	edsCrawl := s.crawlForComparison(ctx, comparison.ID, "eds", edsRoot, opts)
 	if ctx.Err() != nil {
 		s.cancelComparison(comparison)
 		return
 	}
+	edsPages := edsCrawl.Pages
+	comparison.EDSDiscovery = edsCrawl.Discovery
 	comparison.EDSPages = len(edsPages)
 	comparison.EDSFetchFailures = countFetchFailures(edsPages)
 	comparison.Phase = "matching"
 	_ = s.store.UpdateComparison(comparison)
 	s.publish(Event{Type: "matching", ScanID: comparison.ID, Message: "Matching pages by path"})
 
-	matched, missing, extra, sourceFailures, edsFailures := buildComparisonPages(sourcePages, edsPages)
-	comparison = summarizeFastComparison(comparison, matched, missing, extra, sourceFailures, edsFailures)
-	for _, page := range matched {
+	groups := buildComparisonPages(sourcePages, edsPages)
+	comparison = summarizeFastComparison(comparison, groups)
+	for _, page := range groups.Matched {
 		_ = s.store.SaveComparedPage(comparison.ID, "matched", page)
 	}
-	for _, page := range missing {
-		_ = s.store.SaveComparedPage(comparison.ID, "missingInEDS", ComparedPage{Path: comparisonPathKey(page.URL), Status: "fail", Severity: 10, Source: page, Issues: []string{"Missing in migrated EDS site"}})
+	for _, page := range groups.UncertainMatches {
+		_ = s.store.SaveComparedPage(comparison.ID, "uncertainMatches", page)
 	}
-	for _, page := range extra {
-		_ = s.store.SaveComparedPage(comparison.ID, "extraInEDS", ComparedPage{Path: comparisonPathKey(page.URL), Status: "review", Severity: 4, EDS: page, Issues: []string{"Extra page in migrated EDS site"}})
+	for _, page := range groups.MissingInEDS {
+		_ = s.store.SaveComparedPage(comparison.ID, "missingInEDS", ComparedPage{Path: comparisonPathKey(page.URL), Status: "fail", Severity: 10, MatchType: "unmatched", MatchConfidence: "low", Source: page, Issues: []string{"Missing in migrated EDS site"}})
 	}
-	for _, page := range sourceFailures {
-		_ = s.store.SaveComparedPage(comparison.ID, "sourceFetchFailures", ComparedPage{Path: comparisonPathKey(page.URL), Status: "fail", Severity: 10, Source: page, Issues: []string{page.FetchError}})
+	for _, page := range groups.ExtraInEDS {
+		_ = s.store.SaveComparedPage(comparison.ID, "extraInEDS", ComparedPage{Path: comparisonPathKey(page.URL), Status: "review", Severity: 4, MatchType: "unmatched", MatchConfidence: "low", EDS: page, Issues: []string{"Extra page in migrated EDS site"}})
 	}
-	for _, page := range edsFailures {
-		_ = s.store.SaveComparedPage(comparison.ID, "edsFetchFailures", ComparedPage{Path: comparisonPathKey(page.URL), Status: "fail", Severity: 10, EDS: page, Issues: []string{page.FetchError}})
+	for _, page := range groups.SourceFetchFailures {
+		_ = s.store.SaveComparedPage(comparison.ID, "sourceFetchFailures", ComparedPage{Path: comparisonPathKey(page.URL), Status: "fail", Severity: 10, MatchType: "unmatched", MatchConfidence: "low", Source: page, Issues: []string{page.FetchError}})
+	}
+	for _, page := range groups.EDSFetchFailures {
+		_ = s.store.SaveComparedPage(comparison.ID, "edsFetchFailures", ComparedPage{Path: comparisonPathKey(page.URL), Status: "fail", Severity: 10, MatchType: "unmatched", MatchConfidence: "low", EDS: page, Issues: []string{page.FetchError}})
 	}
 	_ = s.store.UpdateComparison(comparison)
 	s.publish(Event{Type: "fast-complete", ScanID: comparison.ID, Message: "Fast comparison ready", Data: comparison})
 
-	matched = s.auditComparison(ctx, comparison.ID, matched, sourceRoot.String(), edsRoot.String(), opts, &comparison)
+	auditTargets := append([]ComparedPage{}, groups.Matched...)
+	auditTargets = append(auditTargets, groups.UncertainMatches...)
+	auditTargets = s.auditComparison(ctx, comparison.ID, auditTargets, sourceRoot.String(), edsRoot.String(), opts, &comparison)
 	if ctx.Err() != nil {
 		s.cancelComparison(comparison)
 		return
 	}
-	matched = s.visualCompare(ctx, comparison.ID, matched, &comparison)
+	auditTargets = s.visualCompare(ctx, comparison.ID, auditTargets, &comparison)
 	if ctx.Err() != nil {
 		s.cancelComparison(comparison)
 		return
@@ -167,39 +198,65 @@ func (s *Service) cancelComparison(comparison ComparisonSummary) {
 	s.publish(Event{Type: "complete", ScanID: comparison.ID, Message: "Comparison cancelled", Data: comparison})
 }
 
-func (s *Service) crawlForComparison(ctx context.Context, comparisonID string, role string, root *url.URL, opts ComparisonOptions) []PageResult {
+func (s *Service) crawlForComparison(ctx context.Context, comparisonID string, role string, root *url.URL, opts ComparisonOptions) comparisonCrawlResult {
 	discoverer := Discoverer{Client: s.client}
-	seeds, err := discoverer.Discover(ctx, root)
-	if err != nil || len(seeds) == 0 {
-		seeds = []string{root.String()}
+	seeds, report := discoverer.DiscoverDetailed(ctx, root)
+	if len(seeds) == 0 {
+		seeds = []DiscoveredURL{{URL: root.String(), Source: "root"}}
+		report.RootURL = root.String()
+		report.Warnings = append(report.Warnings, "Discovery endpoints returned no pages; crawling the entered URL.")
 	}
-	s.publish(Event{Type: role + "-discovered", ScanID: comparisonID, Message: fmt.Sprintf("%s queued %d seed pages", role, len(seeds))})
+	s.publish(Event{Type: role + "-discovered", ScanID: comparisonID, Message: fmt.Sprintf("%s queued %d seed pages", role, len(seeds)), Data: report})
 
 	seen := map[string]bool{}
 	analyzedURLs := map[string]bool{}
-	skipped := 0
 	var queue []string
-	limit := 0
-	if opts.CrawlLimit != nil {
-		limit = *opts.CrawlLimit
-	}
-	enqueue := func(raw string) {
-		if limit > 0 && len(seen)-skipped >= limit {
-			return
+	limit := comparisonCrawlLimit(opts)
+	enqueue := func(raw string, source string) bool {
+		if limit > 0 && len(seen) >= limit {
+			report.LimitHit = true
+			if !hasWarning(report.Warnings, "Crawl limit hit before all discovered URLs were queued.") {
+				report.Warnings = append(report.Warnings, "Crawl limit hit before all discovered URLs were queued.")
+			}
+			return false
 		}
 		normalized, ok := normalizePageURL(raw, root)
-		if !ok || seen[normalized] || analyzedURLs[normalized] {
-			return
+		if !ok {
+			if looksLikeAssetOrDownload(raw, root) {
+				report.SkippedAssets++
+			}
+			return false
 		}
 		parsed, err := url.Parse(normalized)
-		if err != nil || !sameOrigin(parsed, root) {
-			return
+		if err != nil {
+			return false
+		}
+		if !sameOrigin(parsed, root) {
+			report.SkippedExternal++
+			return false
+		}
+		if seen[normalized] || analyzedURLs[normalized] {
+			report.Duplicates++
+			return false
 		}
 		seen[normalized] = true
 		queue = append(queue, normalized)
+		report.TotalQueued = len(seen)
+		switch source {
+		case "static-link":
+			report.FromStaticLinks++
+		case "rendered-link":
+			report.FromRenderedLinks++
+		}
+		return true
 	}
 	for _, seed := range seeds {
-		enqueue(seed)
+		enqueue(seed.URL, seed.Source)
+	}
+	if len(queue) == 1 && opts.RenderedDiscovery != "off" {
+		if added := s.enqueueRenderedLinks(ctx, queue[0], root, enqueue, &report); added > 0 {
+			report.Warnings = append(report.Warnings, "Rendered discovery was used because static discovery only found one page.")
+		}
 	}
 
 	jobs := make(chan string)
@@ -219,10 +276,11 @@ func (s *Service) crawlForComparison(ctx context.Context, comparisonID string, r
 
 	inFlight := 0
 	pages := []PageResult{}
+	renderedTried := map[string]bool{}
 	for len(queue) > 0 || inFlight > 0 {
 		if ctx.Err() != nil {
 			close(jobs)
-			return pages
+			return comparisonCrawlResult{Pages: pages, Discovery: NormalizeDiscoveryReport(report)}
 		}
 		var next string
 		var outbound chan<- string
@@ -239,7 +297,7 @@ func (s *Service) crawlForComparison(ctx context.Context, comparisonID string, r
 			inFlight--
 			identity := pageIdentity(page, root)
 			if identity != "" && analyzedURLs[identity] {
-				skipped++
+				report.Duplicates++
 				continue
 			}
 			if identity != "" {
@@ -254,63 +312,139 @@ func (s *Service) crawlForComparison(ctx context.Context, comparisonID string, r
 			page.AuditStatus = "pending"
 			page = NormalizePage(page)
 			pages = append(pages, page)
+			report.TotalAnalyzed = len(pages)
 			s.publish(Event{Type: role + "-page-analyzed", ScanID: comparisonID, PageURL: page.URL, Data: page})
+			staticAdded := 0
 			for _, link := range page.Links {
-				if link.Kind == "internal" {
-					enqueue(link.URL)
+				if link.Kind == "internal" && enqueue(link.URL, "static-link") {
+					staticAdded++
+				}
+			}
+			if opts.RenderedDiscovery != "off" && page.FetchError == "" && page.ScriptCount > 0 && staticAdded == 0 && !renderedTried[page.URL] {
+				renderedTried[page.URL] = true
+				added := s.enqueueRenderedLinks(ctx, page.URL, root, enqueue, &report)
+				if added > 0 {
+					report.Warnings = append(report.Warnings, fmt.Sprintf("Rendered discovery found %d links on %s.", added, page.URL))
 				}
 			}
 		case <-ctx.Done():
 			close(jobs)
-			return pages
+			return comparisonCrawlResult{Pages: pages, Discovery: NormalizeDiscoveryReport(report)}
 		}
 	}
 	close(jobs)
 	sort.Slice(pages, func(i, j int) bool { return pages[i].URL < pages[j].URL })
-	return pages
+	if len(pages) <= 1 {
+		report.Warnings = append(report.Warnings, "Only one HTML page was discovered; sitemap, query-index, static links, and rendered links did not expose more pages.")
+	}
+	report.TotalQueued = len(seen)
+	report.TotalAnalyzed = len(pages)
+	return comparisonCrawlResult{Pages: pages, Discovery: NormalizeDiscoveryReport(report)}
 }
 
-func buildComparisonPages(sourcePages []PageResult, edsPages []PageResult) ([]ComparedPage, []PageResult, []PageResult, []PageResult, []PageResult) {
+func (s *Service) enqueueRenderedLinks(ctx context.Context, pageURL string, root *url.URL, enqueue func(string, string) bool, report *DiscoveryReport) int {
+	if s.rendered == nil {
+		return 0
+	}
+	links, err := s.rendered.Links(ctx, pageURL, root)
+	if err != nil {
+		message := err.Error()
+		if !hasWarning(report.Warnings, message) {
+			report.Warnings = append(report.Warnings, message)
+		}
+		return 0
+	}
+	added := 0
+	for _, link := range links {
+		if enqueue(link, "rendered-link") {
+			added++
+		}
+	}
+	return added
+}
+
+func comparisonCrawlLimit(opts ComparisonOptions) int {
+	limit := 2000
+	if opts.CrawlLimit != nil && *opts.CrawlLimit > 0 && *opts.CrawlLimit < limit {
+		limit = *opts.CrawlLimit
+	}
+	return limit
+}
+
+func hasWarning(warnings []string, message string) bool {
+	for _, warning := range warnings {
+		if warning == message {
+			return true
+		}
+	}
+	return false
+}
+
+func buildComparisonPages(sourcePages []PageResult, edsPages []PageResult) comparisonPageGroups {
 	sourceByPath := map[string]PageResult{}
 	edsByPath := map[string]PageResult{}
-	var sourceFailures []PageResult
-	var edsFailures []PageResult
+	groups := comparisonPageGroups{}
 	for _, page := range sourcePages {
 		if page.FetchError != "" {
-			sourceFailures = append(sourceFailures, page)
+			groups.SourceFetchFailures = append(groups.SourceFetchFailures, page)
 			continue
 		}
 		sourceByPath[comparisonPathKey(page.URL)] = page
 	}
 	for _, page := range edsPages {
 		if page.FetchError != "" {
-			edsFailures = append(edsFailures, page)
+			groups.EDSFetchFailures = append(groups.EDSFetchFailures, page)
 			continue
 		}
 		edsByPath[comparisonPathKey(page.URL)] = page
 	}
 
-	keys := sortedStringKeys(sourceByPath)
-	var matched []ComparedPage
-	var missing []PageResult
-	for _, key := range keys {
+	usedEDS := map[string]bool{}
+	remainingSource := map[string]PageResult{}
+	for _, key := range sortedStringKeys(sourceByPath) {
 		source := sourceByPath[key]
 		eds, ok := edsByPath[key]
-		if !ok {
-			missing = append(missing, source)
+		if ok {
+			usedEDS[key] = true
+			groups.Matched = append(groups.Matched, comparePagesWithMatch(key, source, eds, "exact", "high"))
 			continue
 		}
-		delete(edsByPath, key)
-		matched = append(matched, comparePages(key, source, eds))
+		remainingSource[key] = source
 	}
-	var extra []PageResult
+
+	aliasMaps := buildAliasMaps(edsByPath, usedEDS)
+	for _, sourceKey := range sortedStringKeys(remainingSource) {
+		source := remainingSource[sourceKey]
+		match, ok := findAliasMatch(source, aliasMaps, usedEDS)
+		if !ok {
+			groups.MissingInEDS = append(groups.MissingInEDS, source)
+			continue
+		}
+		usedEDS[match.EDSKey] = true
+		page := comparePagesWithMatch(match.DisplayKey, source, match.EDS, match.MatchType, match.Confidence)
+		page.SourceAliases = sourceAliases(source)
+		page.EDSAliases = edsAliases(match.EDS)
+		if match.Confidence == "high" {
+			groups.Matched = append(groups.Matched, page)
+		} else {
+			page.Status = "review"
+			page.Issues = append(page.Issues, fmt.Sprintf("Matched by %s alias; verify this page pair.", match.MatchType))
+			groups.UncertainMatches = append(groups.UncertainMatches, NormalizeComparedPage(page))
+		}
+	}
 	for _, key := range sortedStringKeys(edsByPath) {
-		extra = append(extra, edsByPath[key])
+		if !usedEDS[key] {
+			groups.ExtraInEDS = append(groups.ExtraInEDS, edsByPath[key])
+		}
 	}
-	return matched, missing, extra, sourceFailures, edsFailures
+	return groups
 }
 
 func comparePages(key string, source PageResult, eds PageResult) ComparedPage {
+	return comparePagesWithMatch(key, source, eds, "exact", "high")
+}
+
+func comparePagesWithMatch(key string, source PageResult, eds PageResult, matchType string, confidence string) ComparedPage {
 	fieldDiffs := metadataDiffs(source, eds)
 	linkDiffs := linkDiffs(source, eds)
 	issues := []string{}
@@ -331,15 +465,172 @@ func comparePages(key string, source PageResult, eds PageResult) ComparedPage {
 		status = "fail"
 	}
 	return NormalizeComparedPage(ComparedPage{
-		Path:       key,
-		Status:     status,
-		Severity:   severity,
-		Source:     source,
-		EDS:        eds,
-		FieldDiffs: fieldDiffs,
-		LinkDiffs:  linkDiffs,
-		Issues:     issues,
+		Path:            key,
+		Status:          status,
+		Severity:        severity,
+		MatchType:       matchType,
+		MatchConfidence: confidence,
+		SourceAliases:   sourceAliases(source),
+		EDSAliases:      edsAliases(eds),
+		Source:          source,
+		EDS:             eds,
+		FieldDiffs:      fieldDiffs,
+		LinkDiffs:       linkDiffs,
+		Issues:          issues,
 	})
+}
+
+type aliasCandidate struct {
+	Key        string
+	Type       string
+	Confidence string
+}
+
+type aliasMatch struct {
+	DisplayKey string
+	EDSKey     string
+	EDS        PageResult
+	MatchType  string
+	Confidence string
+}
+
+func buildAliasMaps(pages map[string]PageResult, used map[string]bool) map[string]map[string]PageResult {
+	result := map[string]map[string]PageResult{
+		"exact":     {},
+		"redirect":  {},
+		"canonical": {},
+		"og":        {},
+	}
+	for key, page := range pages {
+		if used[key] {
+			continue
+		}
+		for _, alias := range pageAliases(page) {
+			if alias.Key == "" {
+				continue
+			}
+			if _, exists := result[alias.Type][alias.Key]; !exists {
+				result[alias.Type][alias.Key] = page
+			}
+		}
+	}
+	return result
+}
+
+func findAliasMatch(source PageResult, edsAliases map[string]map[string]PageResult, usedEDS map[string]bool) (aliasMatch, bool) {
+	edsPriority := []string{"exact", "redirect", "canonical", "og"}
+	for _, sourceAlias := range pageAliases(source) {
+		for _, edsType := range edsPriority {
+			eds, ok := edsAliases[edsType][sourceAlias.Key]
+			if !ok {
+				continue
+			}
+			edsKey := comparisonPathKey(eds.URL)
+			if usedEDS[edsKey] {
+				continue
+			}
+			matchType, confidence := combineAliasMatch(sourceAlias, edsType)
+			return aliasMatch{
+				DisplayKey: sourceAlias.Key,
+				EDSKey:     edsKey,
+				EDS:        eds,
+				MatchType:  matchType,
+				Confidence: confidence,
+			}, true
+		}
+	}
+	return aliasMatch{}, false
+}
+
+func combineAliasMatch(sourceAlias aliasCandidate, edsType string) (string, string) {
+	matchType := sourceAlias.Type
+	confidence := sourceAlias.Confidence
+	if aliasRank(edsType) > aliasRank(matchType) {
+		matchType = edsType
+	}
+	if aliasConfidenceRank(aliasConfidence(edsType)) < aliasConfidenceRank(confidence) {
+		confidence = aliasConfidence(edsType)
+	}
+	return matchType, confidence
+}
+
+func pageAliases(page PageResult) []aliasCandidate {
+	candidates := []aliasCandidate{{Key: comparisonPathKey(page.URL), Type: "exact", Confidence: "high"}}
+	if key := comparisonPathKey(page.RequestedURL); key != "" && key != candidates[0].Key {
+		candidates = append(candidates, aliasCandidate{Key: key, Type: "redirect", Confidence: "high"})
+	}
+	if key := comparisonPathKey(page.Canonical); key != "" && key != "/" {
+		candidates = append(candidates, aliasCandidate{Key: key, Type: "canonical", Confidence: "medium"})
+	}
+	if key := comparisonPathKey(page.OG.URL); key != "" && key != "/" {
+		candidates = append(candidates, aliasCandidate{Key: key, Type: "og", Confidence: "medium"})
+	}
+	return dedupeAliases(candidates)
+}
+
+func sourceAliases(page PageResult) []string {
+	return aliasStrings(pageAliases(page))
+}
+
+func edsAliases(page PageResult) []string {
+	return aliasStrings(pageAliases(page))
+}
+
+func aliasStrings(aliases []aliasCandidate) []string {
+	values := make([]string, 0, len(aliases))
+	for _, alias := range aliases {
+		values = append(values, alias.Type+":"+alias.Key)
+	}
+	sort.Strings(values)
+	return values
+}
+
+func dedupeAliases(aliases []aliasCandidate) []aliasCandidate {
+	seen := map[string]bool{}
+	var result []aliasCandidate
+	for _, alias := range aliases {
+		if alias.Key == "" || seen[alias.Type+":"+alias.Key] {
+			continue
+		}
+		seen[alias.Type+":"+alias.Key] = true
+		result = append(result, alias)
+	}
+	return result
+}
+
+func aliasRank(value string) int {
+	switch value {
+	case "exact":
+		return 0
+	case "redirect":
+		return 1
+	case "canonical":
+		return 2
+	case "og":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func aliasConfidence(value string) string {
+	if value == "exact" || value == "redirect" {
+		return "high"
+	}
+	return "medium"
+}
+
+func aliasConfidenceRank(value string) int {
+	switch value {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func metadataDiffs(source PageResult, eds PageResult) []FieldDiff {
@@ -400,8 +691,8 @@ func (s *Service) auditComparison(ctx context.Context, comparisonID string, matc
 	}
 	selectedSource := selectAuditPages(sourcePages, scanOpts, sourceRoot)
 	selectedEDS := selectAuditPages(edsPages, scanOpts, edsRoot)
-	sourceSelected := pagesByPath(selectedSource)
-	edsSelected := pagesByPath(selectedEDS)
+	sourceSelected := pagesByURL(selectedSource)
+	edsSelected := pagesByURL(selectedEDS)
 	summary.LighthouseQueued = len(sourceSelected) + len(edsSelected)
 	if summary.LighthouseQueued == 0 {
 		return matched
@@ -413,7 +704,7 @@ func (s *Service) auditComparison(ctx context.Context, comparisonID string, matc
 		if ctx.Err() != nil {
 			return matched
 		}
-		if _, ok := sourceSelected[matched[i].Path]; ok {
+		if _, ok := sourceSelected[matched[i].Source.URL]; ok {
 			page := s.auditPageWithLighthouse(ctx, matched[i].Source)
 			matched[i].Source = page
 			if page.AuditStatus == "failed" {
@@ -423,7 +714,7 @@ func (s *Service) auditComparison(ctx context.Context, comparisonID string, matc
 			}
 			s.publish(Event{Type: "comparison-audit-complete", ScanID: comparisonID, PageURL: page.URL, Data: page})
 		}
-		if _, ok := edsSelected[matched[i].Path]; ok {
+		if _, ok := edsSelected[matched[i].EDS.URL]; ok {
 			page := s.auditPageWithLighthouse(ctx, matched[i].EDS)
 			matched[i].EDS = page
 			if page.AuditStatus == "failed" {
@@ -433,7 +724,7 @@ func (s *Service) auditComparison(ctx context.Context, comparisonID string, matc
 			}
 			s.publish(Event{Type: "comparison-audit-complete", ScanID: comparisonID, PageURL: page.URL, Data: page})
 		}
-		_ = s.store.SaveComparedPage(comparisonID, "matched", matched[i])
+		_ = s.store.SaveComparedPage(comparisonID, comparedPageGroup(matched[i]), matched[i])
 		_ = s.store.UpdateComparison(*summary)
 	}
 	return matched
@@ -467,7 +758,7 @@ func (s *Service) visualCompare(ctx context.Context, comparisonID string, matche
 			}
 			matched[i].Status = pageStatusFromSeverity(matched[i].Severity)
 			_ = s.store.SaveComparisonVisual(comparisonID, matched[i].Path, visual)
-			_ = s.store.SaveComparedPage(comparisonID, "matched", matched[i])
+			_ = s.store.SaveComparedPage(comparisonID, comparedPageGroup(matched[i]), matched[i])
 			_ = s.store.UpdateComparison(*summary)
 			s.publish(Event{Type: "visual-complete", ScanID: comparisonID, PageURL: matched[i].EDS.URL, Data: visual})
 		}
@@ -475,16 +766,24 @@ func (s *Service) visualCompare(ctx context.Context, comparisonID string, matche
 	return matched
 }
 
-func summarizeFastComparison(summary ComparisonSummary, matched []ComparedPage, missing []PageResult, extra []PageResult, sourceFailures []PageResult, edsFailures []PageResult) ComparisonSummary {
+func comparedPageGroup(page ComparedPage) string {
+	if page.MatchConfidence == "medium" || page.MatchType == "canonical" || page.MatchType == "og" {
+		return "uncertainMatches"
+	}
+	return "matched"
+}
+
+func summarizeFastComparison(summary ComparisonSummary, groups comparisonPageGroups) ComparisonSummary {
 	summary.Phase = "fast-complete"
-	summary.MatchedPages = len(matched)
-	summary.MissingInEDS = len(missing)
-	summary.ExtraInEDS = len(extra)
-	summary.SourceFetchFailures = len(sourceFailures)
-	summary.EDSFetchFailures = len(edsFailures)
+	summary.MatchedPages = len(groups.Matched)
+	summary.UncertainMatches = len(groups.UncertainMatches)
+	summary.MissingInEDS = len(groups.MissingInEDS)
+	summary.ExtraInEDS = len(groups.ExtraInEDS)
+	summary.SourceFetchFailures = len(groups.SourceFetchFailures)
+	summary.EDSFetchFailures = len(groups.EDSFetchFailures)
 	summary.MetadataDiffs = 0
 	summary.LinkDiffs = 0
-	for _, page := range matched {
+	for _, page := range append(append([]ComparedPage{}, groups.Matched...), groups.UncertainMatches...) {
 		summary.MetadataDiffs += len(page.FieldDiffs)
 		summary.LinkDiffs += len(page.LinkDiffs)
 	}
@@ -493,11 +792,12 @@ func summarizeFastComparison(summary ComparisonSummary, matched []ComparedPage, 
 }
 
 func migrationScore(summary ComparisonSummary) *float64 {
-	total := summary.MatchedPages + summary.MissingInEDS + summary.ExtraInEDS
+	total := summary.MatchedPages + summary.UncertainMatches + summary.MissingInEDS + summary.ExtraInEDS
 	if total == 0 {
 		return nil
 	}
 	score := 100.0
+	score -= float64(summary.UncertainMatches) * 2
 	score -= float64(summary.MissingInEDS) * 8
 	score -= float64(summary.ExtraInEDS) * 3
 	score -= float64(summary.MetadataDiffs) * 0.8
@@ -515,6 +815,10 @@ func migrationScore(summary ComparisonSummary) *float64 {
 }
 
 func comparisonPathKey(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		value := strings.Trim(strings.ToLower(strings.TrimSpace(raw)), "/")
@@ -533,6 +837,18 @@ func comparisonPathKey(raw string) string {
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
+	}
+	lower := strings.ToLower(path)
+	if lower == "/index" || lower == "/index.html" {
+		return "/"
+	}
+	if strings.HasSuffix(lower, "/index") {
+		path = path[:len(path)-len("/index")]
+	} else if strings.HasSuffix(lower, "/index.html") {
+		path = path[:len(path)-len("/index.html")]
+	}
+	if path == "" {
+		path = "/"
 	}
 	return strings.ToLower(path)
 }
@@ -609,10 +925,10 @@ func sortedStringKeys[T any](values map[string]T) []string {
 	return keys
 }
 
-func pagesByPath(pages []PageResult) map[string]PageResult {
+func pagesByURL(pages []PageResult) map[string]PageResult {
 	result := map[string]PageResult{}
 	for _, page := range pages {
-		result[comparisonPathKey(page.URL)] = page
+		result[page.URL] = page
 	}
 	return result
 }

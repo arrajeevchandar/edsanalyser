@@ -21,6 +21,7 @@ func AnalyzeHTML(pageURL string, body io.Reader, root *url.URL) (PageResult, err
 	}
 
 	page := PageResult{URL: pageURL}
+	page.ScriptCount = countElements(doc, "script")
 	page.Title = textOfFirst(doc, "title")
 	page.H1 = textOfFirst(doc, "h1")
 	page.Canonical = firstLinkRel(doc, "canonical")
@@ -51,6 +52,16 @@ func AnalyzeHTML(pageURL string, body io.Reader, root *url.URL) (PageResult, err
 	page.SectionCount = len(page.Sections)
 	page.BlockCount = len(page.Blocks)
 	return NormalizePage(page), nil
+}
+
+func countElements(doc *html.Node, tag string) int {
+	count := 0
+	walk(doc, func(n *html.Node) {
+		if isElement(n, tag) {
+			count++
+		}
+	})
+	return count
 }
 
 func extractEDS(doc *html.Node) ([]SectionInfo, []BlockInfo) {

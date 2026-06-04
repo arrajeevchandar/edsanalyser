@@ -35,6 +35,9 @@ func NormalizeComparisonResult(result ComparisonResult) ComparisonResult {
 	if result.Matched == nil {
 		result.Matched = []ComparedPage{}
 	}
+	if result.UncertainMatches == nil {
+		result.UncertainMatches = []ComparedPage{}
+	}
 	if result.MissingInEDS == nil {
 		result.MissingInEDS = []PageResult{}
 	}
@@ -53,8 +56,13 @@ func NormalizeComparisonResult(result ComparisonResult) ComparisonResult {
 	if result.Sections == nil {
 		result.Sections = []SectionStat{}
 	}
+	result.Discovery.Source = NormalizeDiscoveryReport(result.Discovery.Source)
+	result.Discovery.EDS = NormalizeDiscoveryReport(result.Discovery.EDS)
 	for i := range result.Matched {
 		result.Matched[i] = NormalizeComparedPage(result.Matched[i])
+	}
+	for i := range result.UncertainMatches {
+		result.UncertainMatches[i] = NormalizeComparedPage(result.UncertainMatches[i])
 	}
 	for i := range result.MissingInEDS {
 		result.MissingInEDS[i] = NormalizePage(result.MissingInEDS[i])
@@ -87,6 +95,18 @@ func NormalizeComparisonResult(result ComparisonResult) ComparisonResult {
 func NormalizeComparedPage(page ComparedPage) ComparedPage {
 	page.Source = NormalizePage(page.Source)
 	page.EDS = NormalizePage(page.EDS)
+	if page.MatchType == "" {
+		page.MatchType = "exact"
+	}
+	if page.MatchConfidence == "" {
+		page.MatchConfidence = "high"
+	}
+	if page.SourceAliases == nil {
+		page.SourceAliases = []string{}
+	}
+	if page.EDSAliases == nil {
+		page.EDSAliases = []string{}
+	}
 	if page.FieldDiffs == nil {
 		page.FieldDiffs = []FieldDiff{}
 	}
@@ -105,7 +125,17 @@ func NormalizeComparedPage(page ComparedPage) ComparedPage {
 	return page
 }
 
+func NormalizeDiscoveryReport(report DiscoveryReport) DiscoveryReport {
+	if report.Warnings == nil {
+		report.Warnings = []string{}
+	}
+	return report
+}
+
 func NormalizePage(page PageResult) PageResult {
+	if page.RequestedURL == "" {
+		page.RequestedURL = page.URL
+	}
 	if page.Links == nil {
 		page.Links = []LinkInfo{}
 	}

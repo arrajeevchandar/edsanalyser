@@ -54,7 +54,7 @@ export function listComparisons(): Promise<ComparisonSummary[]> {
 export function startComparison(sourceUrl: string, edsUrl: string, crawlLimit: number | null = null): Promise<ComparisonSummary> {
   return request<ComparisonSummary>('/api/comparisons', {
     method: 'POST',
-    body: JSON.stringify({ sourceUrl, edsUrl, crawlLimit }),
+    body: JSON.stringify({ sourceUrl, edsUrl, crawlLimit, crawlMode: 'exhaustive', renderedDiscovery: 'auto' }),
   }).then(normalizeComparisonSummary);
 }
 
@@ -88,10 +88,16 @@ function normalizeScanResult(result: ScanResult): ScanResult {
 
 function normalizeComparisonResult(result: ComparisonResult): ComparisonResult {
   const matched = (result.matched || []).map(normalizeComparedPage);
+  const uncertainMatches = (result.uncertainMatches || []).map(normalizeComparedPage);
   return {
     ...result,
     summary: normalizeComparisonSummary(result.summary),
+    discovery: {
+      source: normalizeDiscoveryReport(result.discovery?.source),
+      eds: normalizeDiscoveryReport(result.discovery?.eds),
+    },
     matched,
+    uncertainMatches,
     missingInEDS: (result.missingInEDS || []).map(normalizePage),
     extraInEDS: (result.extraInEDS || []).map(normalizePage),
     sourceFetchFailures: (result.sourceFetchFailures || []).map(normalizePage),
@@ -139,6 +145,7 @@ function normalizeComparisonSummary(summary: ComparisonSummary): ComparisonSumma
     sourcePages: summary.sourcePages ?? 0,
     edsPages: summary.edsPages ?? 0,
     matchedPages: summary.matchedPages ?? 0,
+    uncertainMatches: summary.uncertainMatches ?? 0,
     missingInEDS: summary.missingInEDS ?? 0,
     extraInEDS: summary.extraInEDS ?? 0,
     sourceFetchFailures: summary.sourceFetchFailures ?? 0,
@@ -162,11 +169,33 @@ function normalizeComparedPage(page: ComparedPage): ComparedPage {
     ...page,
     source: normalizePage(page.source || ({} as PageResult)),
     eds: normalizePage(page.eds || ({} as PageResult)),
+    matchType: page.matchType || 'exact',
+    matchConfidence: page.matchConfidence || 'high',
+    sourceAliases: page.sourceAliases || [],
+    edsAliases: page.edsAliases || [],
     fieldDiffs: page.fieldDiffs || [],
     linkDiffs: page.linkDiffs || [],
     visuals: page.visuals || [],
     issues: page.issues || [],
     status: page.status || 'pass',
+  };
+}
+
+function normalizeDiscoveryReport(report: ComparisonResult['discovery']['source'] | null | undefined): ComparisonResult['discovery']['source'] {
+  return {
+    rootUrl: report?.rootUrl || '',
+    totalQueued: report?.totalQueued ?? 0,
+    totalAnalyzed: report?.totalAnalyzed ?? 0,
+    fromSitemap: report?.fromSitemap ?? 0,
+    fromRobots: report?.fromRobots ?? 0,
+    fromQueryIndex: report?.fromQueryIndex ?? 0,
+    fromStaticLinks: report?.fromStaticLinks ?? 0,
+    fromRenderedLinks: report?.fromRenderedLinks ?? 0,
+    duplicates: report?.duplicates ?? 0,
+    skippedAssets: report?.skippedAssets ?? 0,
+    skippedExternal: report?.skippedExternal ?? 0,
+    limitHit: report?.limitHit ?? false,
+    warnings: report?.warnings || [],
   };
 }
 

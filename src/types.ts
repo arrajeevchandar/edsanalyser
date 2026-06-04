@@ -143,6 +143,7 @@ export interface ComparisonSummary {
   sourcePages: number;
   edsPages: number;
   matchedPages: number;
+  uncertainMatches: number;
   missingInEDS: number;
   extraInEDS: number;
   sourceFetchFailures: number;
@@ -159,6 +160,27 @@ export interface ComparisonSummary {
   lighthouseFailed: number;
   migrationScore: NullableScore;
   error?: string;
+}
+
+export interface DiscoveryReport {
+  rootUrl: string;
+  totalQueued: number;
+  totalAnalyzed: number;
+  fromSitemap: number;
+  fromRobots: number;
+  fromQueryIndex: number;
+  fromStaticLinks: number;
+  fromRenderedLinks: number;
+  duplicates: number;
+  skippedAssets: number;
+  skippedExternal: number;
+  limitHit: boolean;
+  warnings: string[];
+}
+
+export interface ComparisonDiscovery {
+  source: DiscoveryReport;
+  eds: DiscoveryReport;
 }
 
 export interface FieldDiff {
@@ -182,6 +204,10 @@ export interface ComparedPage {
   path: string;
   status: string;
   severity: number;
+  matchType: string;
+  matchConfidence: string;
+  sourceAliases: string[];
+  edsAliases: string[];
   source: PageResult;
   eds: PageResult;
   fieldDiffs: FieldDiff[];
@@ -212,7 +238,9 @@ export interface ComparisonSEO {
 
 export interface ComparisonResult {
   summary: ComparisonSummary;
+  discovery: ComparisonDiscovery;
   matched: ComparedPage[];
+  uncertainMatches: ComparedPage[];
   missingInEDS: PageResult[];
   extraInEDS: PageResult[];
   sourceFetchFailures: PageResult[];
