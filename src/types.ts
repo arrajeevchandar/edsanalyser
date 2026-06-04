@@ -82,6 +82,7 @@ export interface PageResult {
   auditStatus: 'pending' | 'running' | 'complete' | 'failed' | string;
   auditError?: string;
   fetchError?: string;
+  matchCandidates: MatchCandidate[];
 }
 
 export interface BlockStat {
@@ -127,6 +128,143 @@ export interface ScanResult {
   sections: SectionStat[];
   links: LinkStats;
   seo: SEOStats;
+  generatedAt: string;
+}
+
+export interface ComparisonSummary {
+  id: string;
+  sourceInputUrl: string;
+  edsInputUrl: string;
+  sourceRootUrl: string;
+  edsRootUrl: string;
+  status: string;
+  phase: string;
+  fastReady: boolean;
+  backgroundPhase: string;
+  startedAt: string;
+  finishedAt?: string;
+  sourcePages: number;
+  edsPages: number;
+  sourceAnalyzed: number;
+  edsAnalyzed: number;
+  matchesUpdatedAt?: string;
+  matchedPages: number;
+  uncertainMatches: number;
+  missingInEDS: number;
+  extraInEDS: number;
+  sourceFetchFailures: number;
+  edsFetchFailures: number;
+  metadataDiffs: number;
+  linkDiffs: number;
+  visualQueued: number;
+  visualCompleted: number;
+  visualFailed: number;
+  visualReview: number;
+  visualFail: number;
+  lighthouseQueued: number;
+  lighthouseCompleted: number;
+  lighthouseFailed: number;
+  migrationScore: NullableScore;
+  error?: string;
+}
+
+export interface DiscoveryReport {
+  rootUrl: string;
+  totalQueued: number;
+  totalAnalyzed: number;
+  fromSitemap: number;
+  fromRobots: number;
+  fromQueryIndex: number;
+  fromStaticLinks: number;
+  fromRenderedLinks: number;
+  duplicates: number;
+  skippedAssets: number;
+  skippedExternal: number;
+  limitHit: boolean;
+  warnings: string[];
+}
+
+export interface ComparisonDiscovery {
+  source: DiscoveryReport;
+  eds: DiscoveryReport;
+}
+
+export interface FieldDiff {
+  field: string;
+  source: string;
+  eds: string;
+  status: string;
+}
+
+export interface MatchCandidate {
+  url: string;
+  path: string;
+  title: string;
+  h1: string;
+  score: number;
+  reason: string;
+}
+
+export interface VisualDiff {
+  viewport: string;
+  sourceImage: string;
+  edsImage: string;
+  diffImage: string;
+  diffPercent: number;
+  status: string;
+  error?: string;
+}
+
+export interface ComparedPage {
+  path: string;
+  status: string;
+  severity: number;
+  matchType: string;
+  matchConfidence: string;
+  matchReason: string;
+  sourceAliases: string[];
+  edsAliases: string[];
+  source: PageResult;
+  eds: PageResult;
+  fieldDiffs: FieldDiff[];
+  linkDiffs: FieldDiff[];
+  visuals: VisualDiff[];
+  issues: string[];
+}
+
+export interface ComparisonLinks {
+  sourceTotal: number;
+  edsTotal: number;
+  missingInternal: number;
+  addedInternal: number;
+  missingExternal: number;
+  addedExternal: number;
+  missingAssets: number;
+  addedAssets: number;
+  matchedPageDiffs: number;
+}
+
+export interface ComparisonSEO {
+  metadataDiffs: number;
+  titleDiffs: number;
+  h1Diffs: number;
+  descriptionDiffs: number;
+  ogDiffs: number;
+}
+
+export interface ComparisonResult {
+  summary: ComparisonSummary;
+  discovery: ComparisonDiscovery;
+  matched: ComparedPage[];
+  uncertainMatches: ComparedPage[];
+  missingInEDS: PageResult[];
+  extraInEDS: PageResult[];
+  sourceFetchFailures: PageResult[];
+  edsFetchFailures: PageResult[];
+  blocks: BlockStat[];
+  sections: SectionStat[];
+  links: ComparisonLinks;
+  seo: ComparisonSEO;
   generatedAt: string;
 }
 

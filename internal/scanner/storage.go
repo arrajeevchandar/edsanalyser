@@ -19,6 +19,17 @@ type Store interface {
 	SavePage(string, PageResult) error
 	ListScans() ([]ScanSummary, error)
 	GetScan(string) (ScanResult, error)
+	CreateComparison(ComparisonSummary) error
+	UpdateComparison(ComparisonSummary) error
+	SaveComparisonRolePage(string, string, PageResult) error
+	ListComparisonRolePages(string, string) ([]PageResult, error)
+	SaveComparedPage(string, string, ComparedPage) error
+	ReplaceComparedPages(string, comparisonPageGroups) error
+	SaveComparisonVisual(string, string, VisualDiff) error
+	SaveComparisonMatchOverride(string, MatchOverride) error
+	ListComparisonMatchOverrides(string) ([]MatchOverride, error)
+	ListComparisons() ([]ComparisonSummary, error)
+	GetComparison(string) (ComparisonResult, error)
 	Close() error
 }
 
@@ -100,6 +111,93 @@ CREATE TABLE IF NOT EXISTS pages (
   audit_error TEXT,
   fetch_error TEXT,
   UNIQUE(scan_id, url)
+);
+CREATE TABLE IF NOT EXISTS comparisons (
+  id TEXT PRIMARY KEY,
+  source_input_url TEXT NOT NULL,
+  eds_input_url TEXT NOT NULL,
+  source_root_url TEXT NOT NULL,
+  eds_root_url TEXT NOT NULL,
+  status TEXT NOT NULL,
+  phase TEXT NOT NULL DEFAULT '',
+  fast_ready INTEGER NOT NULL DEFAULT 0,
+  background_phase TEXT NOT NULL DEFAULT '',
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  source_pages INTEGER NOT NULL DEFAULT 0,
+  eds_pages INTEGER NOT NULL DEFAULT 0,
+  source_analyzed INTEGER NOT NULL DEFAULT 0,
+  eds_analyzed INTEGER NOT NULL DEFAULT 0,
+  matches_updated_at TEXT,
+  matched_pages INTEGER NOT NULL DEFAULT 0,
+  uncertain_matches INTEGER NOT NULL DEFAULT 0,
+  missing_in_eds INTEGER NOT NULL DEFAULT 0,
+  extra_in_eds INTEGER NOT NULL DEFAULT 0,
+  source_fetch_failures INTEGER NOT NULL DEFAULT 0,
+  eds_fetch_failures INTEGER NOT NULL DEFAULT 0,
+  metadata_diffs INTEGER NOT NULL DEFAULT 0,
+  link_diffs INTEGER NOT NULL DEFAULT 0,
+  visual_queued INTEGER NOT NULL DEFAULT 0,
+  visual_completed INTEGER NOT NULL DEFAULT 0,
+  visual_failed INTEGER NOT NULL DEFAULT 0,
+  visual_review INTEGER NOT NULL DEFAULT 0,
+  visual_fail INTEGER NOT NULL DEFAULT 0,
+  lighthouse_queued INTEGER NOT NULL DEFAULT 0,
+  lighthouse_completed INTEGER NOT NULL DEFAULT 0,
+  lighthouse_failed INTEGER NOT NULL DEFAULT 0,
+  migration_score REAL,
+  source_discovery_json TEXT NOT NULL DEFAULT '{}',
+  eds_discovery_json TEXT NOT NULL DEFAULT '{}',
+  error TEXT
+);
+CREATE TABLE IF NOT EXISTS comparison_role_pages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  comparison_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  url TEXT NOT NULL,
+  page_json TEXT NOT NULL,
+  UNIQUE(comparison_id, role, url)
+);
+CREATE TABLE IF NOT EXISTS comparison_pages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  comparison_id TEXT NOT NULL,
+  page_key TEXT NOT NULL,
+  group_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  severity INTEGER NOT NULL DEFAULT 0,
+  match_type TEXT NOT NULL DEFAULT '',
+  match_confidence TEXT NOT NULL DEFAULT '',
+  match_reason TEXT NOT NULL DEFAULT '',
+  source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  eds_aliases_json TEXT NOT NULL DEFAULT '[]',
+  source_json TEXT NOT NULL,
+  eds_json TEXT NOT NULL,
+  field_diffs_json TEXT NOT NULL,
+  link_diffs_json TEXT NOT NULL,
+  issues_json TEXT NOT NULL,
+  UNIQUE(comparison_id, page_key, group_name)
+);
+CREATE TABLE IF NOT EXISTS comparison_visuals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  comparison_id TEXT NOT NULL,
+  page_key TEXT NOT NULL,
+  viewport TEXT NOT NULL,
+  source_image TEXT NOT NULL DEFAULT '',
+  eds_image TEXT NOT NULL DEFAULT '',
+  diff_image TEXT NOT NULL DEFAULT '',
+  diff_percent REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  error TEXT,
+  UNIQUE(comparison_id, page_key, viewport)
+);
+CREATE TABLE IF NOT EXISTS comparison_match_overrides (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  comparison_id TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  eds_url TEXT NOT NULL,
+  action TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(comparison_id, source_url, eds_url)
 );`)
 	if err != nil {
 		return err
@@ -115,6 +213,19 @@ CREATE TABLE IF NOT EXISTS pages (
 		{"scans", "audit_completed_pages", "INTEGER NOT NULL DEFAULT 0"},
 		{"scans", "audit_failed_pages", "INTEGER NOT NULL DEFAULT 0"},
 		{"pages", "audit_status", "TEXT NOT NULL DEFAULT ''"},
+		{"comparisons", "fast_ready", "INTEGER NOT NULL DEFAULT 0"},
+		{"comparisons", "background_phase", "TEXT NOT NULL DEFAULT ''"},
+		{"comparisons", "source_analyzed", "INTEGER NOT NULL DEFAULT 0"},
+		{"comparisons", "eds_analyzed", "INTEGER NOT NULL DEFAULT 0"},
+		{"comparisons", "matches_updated_at", "TEXT"},
+		{"comparisons", "uncertain_matches", "INTEGER NOT NULL DEFAULT 0"},
+		{"comparisons", "source_discovery_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"comparisons", "eds_discovery_json", "TEXT NOT NULL DEFAULT '{}'"},
+		{"comparison_pages", "match_type", "TEXT NOT NULL DEFAULT ''"},
+		{"comparison_pages", "match_confidence", "TEXT NOT NULL DEFAULT ''"},
+		{"comparison_pages", "match_reason", "TEXT NOT NULL DEFAULT ''"},
+		{"comparison_pages", "source_aliases_json", "TEXT NOT NULL DEFAULT '[]'"},
+		{"comparison_pages", "eds_aliases_json", "TEXT NOT NULL DEFAULT '[]'"},
 	} {
 		if err := s.ensureColumn(column.table, column.name, column.def); err != nil {
 			return err
@@ -263,6 +374,362 @@ FROM pages WHERE scan_id = ? ORDER BY url`, id)
 	return NormalizeScanResult(result), nil
 }
 
+func (s *SQLiteStore) CreateComparison(comparison ComparisonSummary) error {
+	sourceDiscovery, _ := json.Marshal(NormalizeDiscoveryReport(comparison.SourceDiscovery))
+	edsDiscovery, _ := json.Marshal(NormalizeDiscoveryReport(comparison.EDSDiscovery))
+	var matchesUpdated any
+	if !comparison.MatchesUpdatedAt.IsZero() {
+		matchesUpdated = comparison.MatchesUpdatedAt.Format(time.RFC3339Nano)
+	}
+	_, err := s.db.Exec(`
+INSERT INTO comparisons (
+  id, source_input_url, eds_input_url, source_root_url, eds_root_url, status, phase, fast_ready, background_phase, started_at,
+  source_pages, eds_pages, source_analyzed, eds_analyzed, matches_updated_at,
+  matched_pages, uncertain_matches, missing_in_eds, extra_in_eds, source_fetch_failures, eds_fetch_failures,
+  metadata_diffs, link_diffs, visual_queued, visual_completed, visual_failed, visual_review, visual_fail,
+  lighthouse_queued, lighthouse_completed, lighthouse_failed, migration_score, source_discovery_json, eds_discovery_json, error
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		comparison.ID, comparison.SourceInputURL, comparison.EDSInputURL, comparison.SourceRootURL, comparison.EDSRootURL,
+		comparison.Status, comparison.Phase, boolInt(comparison.FastReady), comparison.BackgroundPhase, comparison.StartedAt.Format(time.RFC3339Nano),
+		comparison.SourcePages, comparison.EDSPages, comparison.SourceAnalyzed, comparison.EDSAnalyzed, matchesUpdated,
+		comparison.MatchedPages, comparison.UncertainMatches, comparison.MissingInEDS, comparison.ExtraInEDS,
+		comparison.SourceFetchFailures, comparison.EDSFetchFailures, comparison.MetadataDiffs, comparison.LinkDiffs,
+		comparison.VisualQueued, comparison.VisualCompleted, comparison.VisualFailed, comparison.VisualReview, comparison.VisualFail,
+		comparison.LighthouseQueued, comparison.LighthouseCompleted, comparison.LighthouseFailed, nullable(comparison.MigrationScore),
+		string(sourceDiscovery), string(edsDiscovery), comparison.Error)
+	return err
+}
+
+func (s *SQLiteStore) UpdateComparison(comparison ComparisonSummary) error {
+	var finished any
+	if !comparison.FinishedAt.IsZero() {
+		finished = comparison.FinishedAt.Format(time.RFC3339Nano)
+	}
+	var matchesUpdated any
+	if !comparison.MatchesUpdatedAt.IsZero() {
+		matchesUpdated = comparison.MatchesUpdatedAt.Format(time.RFC3339Nano)
+	}
+	sourceDiscovery, _ := json.Marshal(NormalizeDiscoveryReport(comparison.SourceDiscovery))
+	edsDiscovery, _ := json.Marshal(NormalizeDiscoveryReport(comparison.EDSDiscovery))
+	_, err := s.db.Exec(`
+UPDATE comparisons
+SET status = ?, phase = ?, fast_ready = ?, background_phase = ?, finished_at = ?, source_pages = ?, eds_pages = ?,
+    source_analyzed = ?, eds_analyzed = ?, matches_updated_at = ?, matched_pages = ?,
+    uncertain_matches = ?, missing_in_eds = ?, extra_in_eds = ?, source_fetch_failures = ?, eds_fetch_failures = ?,
+    metadata_diffs = ?, link_diffs = ?, visual_queued = ?, visual_completed = ?, visual_failed = ?,
+    visual_review = ?, visual_fail = ?, lighthouse_queued = ?, lighthouse_completed = ?, lighthouse_failed = ?,
+    migration_score = ?, source_discovery_json = ?, eds_discovery_json = ?, error = ?
+WHERE id = ?`,
+		comparison.Status, comparison.Phase, boolInt(comparison.FastReady), comparison.BackgroundPhase, finished,
+		comparison.SourcePages, comparison.EDSPages, comparison.SourceAnalyzed, comparison.EDSAnalyzed, matchesUpdated, comparison.MatchedPages,
+		comparison.UncertainMatches, comparison.MissingInEDS, comparison.ExtraInEDS, comparison.SourceFetchFailures, comparison.EDSFetchFailures,
+		comparison.MetadataDiffs, comparison.LinkDiffs, comparison.VisualQueued, comparison.VisualCompleted, comparison.VisualFailed,
+		comparison.VisualReview, comparison.VisualFail, comparison.LighthouseQueued, comparison.LighthouseCompleted, comparison.LighthouseFailed,
+		nullable(comparison.MigrationScore), string(sourceDiscovery), string(edsDiscovery), comparison.Error, comparison.ID)
+	return err
+}
+
+func (s *SQLiteStore) SaveComparisonRolePage(comparisonID string, role string, page PageResult) error {
+	page = NormalizePage(page)
+	payload, _ := json.Marshal(page)
+	_, err := s.db.Exec(`
+INSERT INTO comparison_role_pages (comparison_id, role, url, page_json)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(comparison_id, role, url) DO UPDATE SET page_json=excluded.page_json`,
+		comparisonID, role, page.URL, string(payload))
+	return err
+}
+
+func (s *SQLiteStore) ListComparisonRolePages(comparisonID string, role string) ([]PageResult, error) {
+	rows, err := s.db.Query(`
+SELECT page_json FROM comparison_role_pages WHERE comparison_id = ? AND role = ? ORDER BY url`, comparisonID, role)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	pages := []PageResult{}
+	for rows.Next() {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return nil, err
+		}
+		var page PageResult
+		_ = json.Unmarshal([]byte(payload), &page)
+		pages = append(pages, NormalizePage(page))
+	}
+	return pages, rows.Err()
+}
+
+func (s *SQLiteStore) SaveComparedPage(comparisonID string, group string, page ComparedPage) error {
+	return saveComparedPage(s.db, comparisonID, group, page)
+}
+
+func (s *SQLiteStore) ReplaceComparedPages(comparisonID string, groups comparisonPageGroups) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM comparison_pages WHERE comparison_id = ?`, comparisonID); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	for _, page := range groups.Matched {
+		if err := saveComparedPage(tx, comparisonID, "matched", page); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	for _, page := range groups.UncertainMatches {
+		if err := saveComparedPage(tx, comparisonID, "uncertainMatches", page); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	for _, page := range groups.MissingInEDS {
+		row := ComparedPage{Path: comparisonPathKey(page.URL), Status: "fail", Severity: 10, MatchType: "unmatched", MatchConfidence: "low", MatchReason: "No EDS page matched this source page.", Source: page, Issues: []string{"Missing in migrated EDS site"}}
+		if err := saveComparedPage(tx, comparisonID, "missingInEDS", row); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	for _, page := range groups.ExtraInEDS {
+		row := ComparedPage{Path: comparisonPathKey(page.URL), Status: "review", Severity: 4, MatchType: "unmatched", MatchConfidence: "low", MatchReason: "No legacy source page matched this EDS page.", EDS: page, Issues: []string{"Extra page in migrated EDS site"}}
+		if err := saveComparedPage(tx, comparisonID, "extraInEDS", row); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	for _, page := range groups.SourceFetchFailures {
+		row := ComparedPage{Path: comparisonPathKey(page.URL), Status: "fail", Severity: 10, MatchType: "unmatched", MatchConfidence: "low", MatchReason: "Source fetch failed.", Source: page, Issues: []string{page.FetchError}}
+		if err := saveComparedPage(tx, comparisonID, "sourceFetchFailures", row); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	for _, page := range groups.EDSFetchFailures {
+		row := ComparedPage{Path: comparisonPathKey(page.URL), Status: "fail", Severity: 10, MatchType: "unmatched", MatchConfidence: "low", MatchReason: "EDS fetch failed.", EDS: page, Issues: []string{page.FetchError}}
+		if err := saveComparedPage(tx, comparisonID, "edsFetchFailures", row); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func saveComparedPage(exec sqlExecer, comparisonID string, group string, page ComparedPage) error {
+	page = NormalizeComparedPage(page)
+	source, _ := json.Marshal(page.Source)
+	eds, _ := json.Marshal(page.EDS)
+	fields, _ := json.Marshal(page.FieldDiffs)
+	links, _ := json.Marshal(page.LinkDiffs)
+	issues, _ := json.Marshal(page.Issues)
+	sourceAliases, _ := json.Marshal(page.SourceAliases)
+	edsAliases, _ := json.Marshal(page.EDSAliases)
+	_, err := exec.Exec(`
+INSERT INTO comparison_pages (
+  comparison_id, page_key, group_name, status, severity, match_type, match_confidence, match_reason, source_aliases_json, eds_aliases_json,
+  source_json, eds_json, field_diffs_json, link_diffs_json, issues_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(comparison_id, page_key, group_name) DO UPDATE SET
+  status=excluded.status, severity=excluded.severity, match_type=excluded.match_type, match_confidence=excluded.match_confidence,
+  match_reason=excluded.match_reason,
+  source_aliases_json=excluded.source_aliases_json, eds_aliases_json=excluded.eds_aliases_json,
+  source_json=excluded.source_json, eds_json=excluded.eds_json,
+  field_diffs_json=excluded.field_diffs_json, link_diffs_json=excluded.link_diffs_json, issues_json=excluded.issues_json`,
+		comparisonID, page.Path, group, page.Status, page.Severity, page.MatchType, page.MatchConfidence, page.MatchReason, string(sourceAliases), string(edsAliases),
+		string(source), string(eds), string(fields), string(links), string(issues))
+	return err
+}
+
+func (s *SQLiteStore) SaveComparisonVisual(comparisonID string, pageKey string, visual VisualDiff) error {
+	_, err := s.db.Exec(`
+INSERT INTO comparison_visuals (
+  comparison_id, page_key, viewport, source_image, eds_image, diff_image, diff_percent, status, error
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(comparison_id, page_key, viewport) DO UPDATE SET
+  source_image=excluded.source_image, eds_image=excluded.eds_image, diff_image=excluded.diff_image,
+  diff_percent=excluded.diff_percent, status=excluded.status, error=excluded.error`,
+		comparisonID, pageKey, visual.Viewport, visual.SourceImage, visual.EDSImage, visual.DiffImage, visual.DiffPercent, visual.Status, visual.Error)
+	return err
+}
+
+func (s *SQLiteStore) SaveComparisonMatchOverride(comparisonID string, override MatchOverride) error {
+	override.Action = strings.ToLower(strings.TrimSpace(override.Action))
+	if override.Action != "match" && override.Action != "unmatch" {
+		return errors.New("match override action must be match or unmatch")
+	}
+	_, err := s.db.Exec(`
+INSERT INTO comparison_match_overrides (comparison_id, source_url, eds_url, action, created_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(comparison_id, source_url, eds_url) DO UPDATE SET action=excluded.action, created_at=excluded.created_at`,
+		comparisonID, strings.TrimSpace(override.SourceURL), strings.TrimSpace(override.EDSURL), override.Action, time.Now().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *SQLiteStore) ListComparisonMatchOverrides(comparisonID string) ([]MatchOverride, error) {
+	rows, err := s.db.Query(`
+SELECT source_url, eds_url, action FROM comparison_match_overrides WHERE comparison_id = ? ORDER BY created_at`, comparisonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	overrides := []MatchOverride{}
+	for rows.Next() {
+		var override MatchOverride
+		if err := rows.Scan(&override.SourceURL, &override.EDSURL, &override.Action); err != nil {
+			return nil, err
+		}
+		overrides = append(overrides, override)
+	}
+	return overrides, rows.Err()
+}
+
+func (s *SQLiteStore) ListComparisons() ([]ComparisonSummary, error) {
+	rows, err := s.db.Query(`
+SELECT id, source_input_url, eds_input_url, source_root_url, eds_root_url, status, COALESCE(phase, ''),
+       COALESCE(fast_ready, 0), COALESCE(background_phase, ''), started_at, COALESCE(finished_at, ''),
+       source_pages, eds_pages, COALESCE(source_analyzed, source_pages), COALESCE(eds_analyzed, eds_pages), COALESCE(matches_updated_at, ''),
+       matched_pages, uncertain_matches, missing_in_eds, extra_in_eds,
+       source_fetch_failures, eds_fetch_failures, metadata_diffs, link_diffs, visual_queued, visual_completed,
+       visual_failed, visual_review, visual_fail, lighthouse_queued, lighthouse_completed, lighthouse_failed,
+       migration_score, COALESCE(source_discovery_json, '{}'), COALESCE(eds_discovery_json, '{}'), COALESCE(error, '')
+FROM comparisons ORDER BY started_at DESC LIMIT 50`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	comparisons := []ComparisonSummary{}
+	for rows.Next() {
+		comparison, err := comparisonFromRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		comparisons = append(comparisons, comparison)
+	}
+	return comparisons, rows.Err()
+}
+
+func (s *SQLiteStore) GetComparison(id string) (ComparisonResult, error) {
+	row := s.db.QueryRow(`
+SELECT id, source_input_url, eds_input_url, source_root_url, eds_root_url, status, COALESCE(phase, ''),
+       COALESCE(fast_ready, 0), COALESCE(background_phase, ''), started_at, COALESCE(finished_at, ''),
+       source_pages, eds_pages, COALESCE(source_analyzed, source_pages), COALESCE(eds_analyzed, eds_pages), COALESCE(matches_updated_at, ''),
+       matched_pages, uncertain_matches, missing_in_eds, extra_in_eds,
+       source_fetch_failures, eds_fetch_failures, metadata_diffs, link_diffs, visual_queued, visual_completed,
+       visual_failed, visual_review, visual_fail, lighthouse_queued, lighthouse_completed, lighthouse_failed,
+       migration_score, COALESCE(source_discovery_json, '{}'), COALESCE(eds_discovery_json, '{}'), COALESCE(error, '')
+FROM comparisons WHERE id = ?`, id)
+	summary, err := comparisonFromRows(row)
+	if err != nil {
+		return ComparisonResult{}, err
+	}
+
+	rows, err := s.db.Query(`
+SELECT page_key, group_name, status, severity, COALESCE(match_type, ''), COALESCE(match_confidence, ''),
+       COALESCE(match_reason, ''), COALESCE(source_aliases_json, '[]'), COALESCE(eds_aliases_json, '[]'),
+       source_json, eds_json, field_diffs_json, link_diffs_json, issues_json
+FROM comparison_pages WHERE comparison_id = ? ORDER BY group_name, page_key`, id)
+	if err != nil {
+		return ComparisonResult{}, err
+	}
+
+	result := ComparisonResult{
+		Summary:             summary,
+		Discovery:           ComparisonDiscovery{Source: summary.SourceDiscovery, EDS: summary.EDSDiscovery},
+		Matched:             []ComparedPage{},
+		UncertainMatches:    []ComparedPage{},
+		MissingInEDS:        []PageResult{},
+		ExtraInEDS:          []PageResult{},
+		SourceFetchFailures: []PageResult{},
+		EDSFetchFailures:    []PageResult{},
+		Blocks:              []BlockStat{},
+		Sections:            []SectionStat{},
+		GeneratedAt:         time.Now(),
+	}
+
+	var edsPages []PageResult
+	for rows.Next() {
+		page, group, err := comparedPageFromRows(rows)
+		if err != nil {
+			_ = rows.Close()
+			return ComparisonResult{}, err
+		}
+		page = NormalizeComparedPage(page)
+		switch group {
+		case "matched":
+			result.Matched = append(result.Matched, page)
+			result.Links.MatchedPageDiffs += len(page.LinkDiffs)
+			edsPages = append(edsPages, page.EDS)
+		case "uncertainMatches":
+			result.UncertainMatches = append(result.UncertainMatches, page)
+			result.Links.MatchedPageDiffs += len(page.LinkDiffs)
+			edsPages = append(edsPages, page.EDS)
+		case "missingInEDS":
+			result.MissingInEDS = append(result.MissingInEDS, page.Source)
+		case "extraInEDS":
+			result.ExtraInEDS = append(result.ExtraInEDS, page.EDS)
+			edsPages = append(edsPages, page.EDS)
+		case "sourceFetchFailures":
+			result.SourceFetchFailures = append(result.SourceFetchFailures, page.Source)
+		case "edsFetchFailures":
+			result.EDSFetchFailures = append(result.EDSFetchFailures, page.EDS)
+			edsPages = append(edsPages, page.EDS)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return ComparisonResult{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return ComparisonResult{}, err
+	}
+	visuals, err := s.comparisonVisuals(id)
+	if err != nil {
+		return ComparisonResult{}, err
+	}
+	for i := range result.Matched {
+		result.Matched[i].Visuals = visuals[result.Matched[i].Path]
+		result.Matched[i] = NormalizeComparedPage(result.Matched[i])
+	}
+	for i := range result.UncertainMatches {
+		result.UncertainMatches[i].Visuals = visuals[result.UncertainMatches[i].Path]
+		result.UncertainMatches[i] = NormalizeComparedPage(result.UncertainMatches[i])
+	}
+	result.Blocks, result.Sections, _, _ = aggregate(edsPages)
+	matchedForAggregation := append([]ComparedPage{}, result.Matched...)
+	matchedForAggregation = append(matchedForAggregation, result.UncertainMatches...)
+	result.Links, result.SEO = aggregateComparison(matchedForAggregation)
+	return NormalizeComparisonResult(result), nil
+}
+
+func (s *SQLiteStore) comparisonVisuals(id string) (map[string][]VisualDiff, error) {
+	rows, err := s.db.Query(`
+SELECT page_key, viewport, source_image, eds_image, diff_image, diff_percent, status, COALESCE(error, '')
+FROM comparison_visuals WHERE comparison_id = ? ORDER BY page_key, viewport`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	visuals := map[string][]VisualDiff{}
+	for rows.Next() {
+		var key string
+		var visual VisualDiff
+		if err := rows.Scan(&key, &visual.Viewport, &visual.SourceImage, &visual.EDSImage, &visual.DiffImage, &visual.DiffPercent, &visual.Status, &visual.Error); err != nil {
+			return nil, err
+		}
+		visuals[key] = append(visuals[key], visual)
+	}
+	return visuals, rows.Err()
+}
+
 type scannerRows interface {
 	Scan(dest ...any) error
 }
@@ -297,6 +764,64 @@ func scanFromRows(row scannerRows) (ScanSummary, error) {
 	return scan, nil
 }
 
+func comparisonFromRows(row scannerRows) (ComparisonSummary, error) {
+	var comparison ComparisonSummary
+	var startedAt, finishedAt, matchesUpdatedAt, sourceDiscoveryJSON, edsDiscoveryJSON string
+	var fastReady int
+	var score sql.NullFloat64
+	if err := row.Scan(&comparison.ID, &comparison.SourceInputURL, &comparison.EDSInputURL, &comparison.SourceRootURL, &comparison.EDSRootURL,
+		&comparison.Status, &comparison.Phase, &fastReady, &comparison.BackgroundPhase, &startedAt, &finishedAt,
+		&comparison.SourcePages, &comparison.EDSPages, &comparison.SourceAnalyzed, &comparison.EDSAnalyzed, &matchesUpdatedAt,
+		&comparison.MatchedPages, &comparison.UncertainMatches, &comparison.MissingInEDS, &comparison.ExtraInEDS, &comparison.SourceFetchFailures,
+		&comparison.EDSFetchFailures, &comparison.MetadataDiffs, &comparison.LinkDiffs, &comparison.VisualQueued,
+		&comparison.VisualCompleted, &comparison.VisualFailed, &comparison.VisualReview, &comparison.VisualFail,
+		&comparison.LighthouseQueued, &comparison.LighthouseCompleted, &comparison.LighthouseFailed, &score,
+		&sourceDiscoveryJSON, &edsDiscoveryJSON, &comparison.Error); err != nil {
+		return comparison, err
+	}
+	if comparison.Phase == "" {
+		comparison.Phase = comparison.Status
+	}
+	comparison.FastReady = fastReady != 0
+	comparison.StartedAt = parseTime(startedAt)
+	if finishedAt != "" {
+		comparison.FinishedAt = parseTime(finishedAt)
+	}
+	if matchesUpdatedAt != "" {
+		comparison.MatchesUpdatedAt = parseTime(matchesUpdatedAt)
+	}
+	if comparison.SourceAnalyzed == 0 && comparison.SourcePages > 0 {
+		comparison.SourceAnalyzed = comparison.SourcePages
+	}
+	if comparison.EDSAnalyzed == 0 && comparison.EDSPages > 0 {
+		comparison.EDSAnalyzed = comparison.EDSPages
+	}
+	comparison.MigrationScore = fromNull(score)
+	_ = json.Unmarshal([]byte(sourceDiscoveryJSON), &comparison.SourceDiscovery)
+	_ = json.Unmarshal([]byte(edsDiscoveryJSON), &comparison.EDSDiscovery)
+	comparison.SourceDiscovery = NormalizeDiscoveryReport(comparison.SourceDiscovery)
+	comparison.EDSDiscovery = NormalizeDiscoveryReport(comparison.EDSDiscovery)
+	return comparison, nil
+}
+
+func comparedPageFromRows(rows *sql.Rows) (ComparedPage, string, error) {
+	var page ComparedPage
+	var group string
+	var sourceJSON, edsJSON, fieldsJSON, linksJSON, issuesJSON, sourceAliasesJSON, edsAliasesJSON string
+	if err := rows.Scan(&page.Path, &group, &page.Status, &page.Severity, &page.MatchType, &page.MatchConfidence,
+		&page.MatchReason, &sourceAliasesJSON, &edsAliasesJSON, &sourceJSON, &edsJSON, &fieldsJSON, &linksJSON, &issuesJSON); err != nil {
+		return page, group, err
+	}
+	_ = json.Unmarshal([]byte(sourceJSON), &page.Source)
+	_ = json.Unmarshal([]byte(edsJSON), &page.EDS)
+	_ = json.Unmarshal([]byte(fieldsJSON), &page.FieldDiffs)
+	_ = json.Unmarshal([]byte(linksJSON), &page.LinkDiffs)
+	_ = json.Unmarshal([]byte(issuesJSON), &page.Issues)
+	_ = json.Unmarshal([]byte(sourceAliasesJSON), &page.SourceAliases)
+	_ = json.Unmarshal([]byte(edsAliasesJSON), &page.EDSAliases)
+	return NormalizeComparedPage(page), group, nil
+}
+
 func pageFromRows(rows *sql.Rows) (PageResult, error) {
 	var page PageResult
 	var ogJSON, linksJSON, blocksJSON, sectionsJSON string
@@ -320,6 +845,54 @@ func pageFromRows(rows *sql.Rows) (PageResult, error) {
 		Health:        fromNull(health),
 	}
 	return NormalizePage(page), nil
+}
+
+func aggregateComparison(matched []ComparedPage) (ComparisonLinks, ComparisonSEO) {
+	var links ComparisonLinks
+	var seo ComparisonSEO
+	for _, page := range matched {
+		links.SourceTotal += page.Source.LinkCount
+		links.EDSTotal += page.EDS.LinkCount
+		for _, diff := range page.LinkDiffs {
+			switch diff.Field {
+			case "missing internal links":
+				links.MissingInternal += countCSV(diff.Source)
+			case "added internal links":
+				links.AddedInternal += countCSV(diff.EDS)
+			case "missing external links":
+				links.MissingExternal += countCSV(diff.Source)
+			case "added external links":
+				links.AddedExternal += countCSV(diff.EDS)
+			case "missing assets":
+				links.MissingAssets += countCSV(diff.Source)
+			case "added assets":
+				links.AddedAssets += countCSV(diff.EDS)
+			}
+		}
+		for _, diff := range page.FieldDiffs {
+			seo.MetadataDiffs++
+			switch diff.Field {
+			case "title":
+				seo.TitleDiffs++
+			case "h1":
+				seo.H1Diffs++
+			case "description":
+				seo.DescriptionDiffs++
+			case "og:title", "og:description", "og:image", "og:url", "og:type", "og:site_name":
+				seo.OGDiffs++
+			}
+		}
+	}
+	links.MatchedPageDiffs = links.MissingInternal + links.AddedInternal + links.MissingExternal + links.AddedExternal + links.MissingAssets + links.AddedAssets
+	return links, seo
+}
+
+func countCSV(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	return len(strings.Split(value, ", "))
 }
 
 func aggregate(pages []PageResult) ([]BlockStat, []SectionStat, LinkStats, SEOStats) {
@@ -531,6 +1104,13 @@ func nullable(value *float64) any {
 		return nil
 	}
 	return *value
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func fromNull(value sql.NullFloat64) *float64 {

@@ -23,37 +23,38 @@ beforeEach(() => {
 });
 
 describe('App', () => {
-  it('renders the dashboard shell and loads history', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse([]));
+  it('renders the compare-first dashboard shell and loads histories', async () => {
+    mockHistories();
+
     render(<App />);
+
     expect(screen.getByText('EDS Analyser')).toBeInTheDocument();
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/scans', expect.any(Object)));
+    expect(await screen.findByText('Compare a legacy site to its EDS migration')).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith('/api/scans', expect.any(Object));
+    expect(fetchMock).toHaveBeenCalledWith('/api/comparisons', expect.any(Object));
   });
 
-  it('handles empty API history encoded as null', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(null));
+  it('handles empty API histories encoded as null', async () => {
+    mockHistories(null, null);
+
     render(<App />);
+
+    expect(await screen.findByText('Compare a legacy site to its EDS migration')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Scan' }));
     expect(await screen.findByText('No scan selected')).toBeInTheDocument();
   });
 
   it('starts a scan from the URL form', async () => {
+    const summary = scanSummary('scan-1', { status: 'running', phase: 'discovering' });
+    mockHistories();
     fetchMock
-      .mockResolvedValueOnce(jsonResponse([]))
       .mockResolvedValueOnce(jsonResponse({ isEDS: true, url: 'https://example.com/' }))
-      .mockResolvedValueOnce(jsonResponse({
-        id: 'scan-1',
-        inputUrl: 'https://example.com',
-        rootUrl: 'https://example.com/',
-        status: 'running',
-        startedAt: new Date().toISOString(),
-        discoveredPages: 0,
-        completedPages: 0,
-        failedPages: 0,
-        scores: { performance: null, accessibility: null, bestPractices: null, seo: null, health: null },
-      }))
+      .mockResolvedValueOnce(jsonResponse(summary))
+      .mockResolvedValueOnce(jsonResponse([summary]))
       .mockResolvedValueOnce(jsonResponse([]));
 
     render(<App />);
+    await userEvent.click(screen.getByRole('button', { name: 'Scan' }));
     await userEvent.type(screen.getByLabelText('EDS URL'), 'https://example.com');
     await userEvent.click(screen.getByTitle('Start scan'));
 
@@ -62,56 +63,112 @@ describe('App', () => {
   });
 
   it('shows the "enter an EDS site" modal when the site is not EDS', async () => {
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse([]))
-      .mockResolvedValueOnce(jsonResponse({ isEDS: false, url: 'https://not-eds.com/' }));
+    mockHistories();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ isEDS: false, url: 'https://not-eds.com/' }));
 
     render(<App />);
+    await userEvent.click(screen.getByRole('button', { name: 'Scan' }));
     await userEvent.type(screen.getByLabelText('EDS URL'), 'https://not-eds.com');
     await userEvent.click(screen.getByTitle('Start scan'));
 
     expect(await screen.findByText('Enter an EDS site')).toBeInTheDocument();
-    // The scan must not start when the site is not EDS.
     expect(fetchMock).not.toHaveBeenCalledWith('/api/scans', expect.objectContaining({ method: 'POST' }));
+  });
+
+  it('starts a comparison from the two URL form', async () => {
+    const summary = comparisonSummary('cmp-1', { status: 'running', phase: 'source-crawl' });
+    mockHistories();
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(summary))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([summary]));
+
+    render(<App />);
+    await userEvent.type(screen.getByLabelText('Legacy site URL'), 'https://legacy.example.com');
+    await userEvent.type(screen.getByLabelText('Migrated EDS URL'), 'https://eds.example.com');
+    await userEvent.click(screen.getByTitle('Start comparison'));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/comparisons',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ sourceUrl: 'https://legacy.example.com', edsUrl: 'https://eds.example.com', crawlLimit: null, crawlMode: 'exhaustive', renderedDiscovery: 'auto' }),
+        }),
+      ),
+    );
+    expect(await screen.findByText(/legacy\.example\.com to eds\.example\.com/)).toBeInTheDocument();
+  });
+
+  it('renders comparison overview and page detail with missing visual diff data', async () => {
+    const summary = comparisonSummary('cmp-detail');
+    const result = comparisonResult(summary);
+    mockHistories([], [summary]);
+    fetchMock.mockResolvedValueOnce(jsonResponse(result));
+
+    render(<App />);
+    await userEvent.click(await screen.findByText(/legacy\.example\.com to eds\.example\.com/));
+
+    expect(await screen.findByText('Matched paths')).toBeInTheDocument();
+    expect(screen.getByText('Missing in EDS')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pages' }));
+    expect(await screen.findByText(/No screenshots yet/)).toBeInTheDocument();
+    expect(screen.getByText('Legacy source')).toBeInTheDocument();
+    expect(screen.getByText('Migrated EDS')).toBeInTheDocument();
+    expect(screen.getByText('Missing in EDS')).toBeInTheDocument();
+    expect(screen.getByText('Extra EDS')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Missing' }));
+    expect(await screen.findByText('EDS page missing.')).toBeInTheDocument();
+  });
+
+  it('accepts a suggested comparison match from a missing page', async () => {
+    const summary = comparisonSummary('cmp-candidate');
+    const result = comparisonResult(summary);
+    mockHistories([], [summary]);
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(result))
+      .mockResolvedValueOnce(jsonResponse({ ...result, matched: [...result.matched, {
+        ...result.matched[0],
+        path: '/missing',
+        source: result.missingInEDS[0],
+        eds: result.extraInEDS[0],
+        matchType: 'manual',
+        matchConfidence: 'high',
+        matchReason: 'Matched manually by user override.',
+      }], missingInEDS: [], extraInEDS: [] }))
+      .mockResolvedValueOnce(jsonResponse([]))
+      .mockResolvedValueOnce(jsonResponse([summary]));
+
+    render(<App />);
+    await userEvent.click(await screen.findByText(/legacy\.example\.com to eds\.example\.com/));
+    await userEvent.click(screen.getByRole('button', { name: 'Pages' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Missing' }));
+    expect(await screen.findByText('Suggested matches')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Accept' }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/comparisons/cmp-candidate/matches',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ sourceUrl: 'https://legacy.example.com/missing', edsUrl: 'https://eds.example.com/extra', action: 'match' }),
+        }),
+      ),
+    );
   });
 
   it('runs Lighthouse for all pages from the overview button', async () => {
     const summary = scanSummary('scan-audit');
-    const result = {
-      summary,
-      pages: [{
-        url: 'https://example.com/',
-        statusCode: 200,
-        title: 'Home',
-        h1: 'Home',
-        canonical: '',
-        description: '',
-        robots: '',
-        lang: '',
-        og: { title: 'Home', description: '', image: '', url: '', type: '', siteName: '' },
-        links: [],
-        blocks: [],
-        sections: [],
-        blockCount: 0,
-        sectionCount: 0,
-        linkCount: 0,
-        internalLinks: 0,
-        externalLinks: 0,
-        lighthouse: { performance: null, accessibility: null, bestPractices: null, seo: null, health: null },
-        auditStatus: 'pending',
-      }],
-      blocks: [],
-      sections: [],
-      links: null,
-      seo: null,
-      generatedAt: new Date().toISOString(),
-    };
+    const result = scanResult(summary);
+    mockHistories([summary], []);
     fetchMock
-      .mockResolvedValueOnce(jsonResponse([summary]))   // listScans
-      .mockResolvedValueOnce(jsonResponse(result))       // getScan
-      .mockResolvedValueOnce(jsonResponse({ ...summary, status: 'running', phase: 'auditing' })); // reauditScan
+      .mockResolvedValueOnce(jsonResponse(result))
+      .mockResolvedValueOnce(jsonResponse({ ...summary, status: 'running', phase: 'auditing' }));
 
     render(<App />);
+    await userEvent.click(screen.getByRole('button', { name: 'Scan' }));
     await userEvent.click(await screen.findByText('example.com'));
     await userEvent.click(await screen.findByRole('button', { name: /Run Lighthouse for all pages/i }));
 
@@ -125,39 +182,25 @@ describe('App', () => {
 
   it('renders old scan data with null nested arrays without blanking tabs', async () => {
     const summary = scanSummary('scan-null');
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse([summary]))
-      .mockResolvedValueOnce(jsonResponse({
-        summary,
-        pages: [{
-          url: 'https://example.com/',
-          statusCode: 200,
-          title: 'Home',
-          h1: '',
-          canonical: '',
-          description: '',
-          robots: '',
-          lang: '',
-          og: { title: 'Home', description: '', image: '', url: '', type: '', siteName: '' },
-          links: null,
-          blocks: null,
-          sections: null,
-          blockCount: 0,
-          sectionCount: 0,
-          linkCount: 0,
-          internalLinks: 0,
-          externalLinks: 0,
-          lighthouse: { performance: null, accessibility: null, bestPractices: null, seo: null, health: null },
-          auditStatus: '',
-        }],
+    mockHistories([summary], []);
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      ...scanResult(summary),
+      pages: [{
+        ...pageResult('https://example.com/'),
+        h1: '',
+        links: null,
         blocks: null,
         sections: null,
-        links: null,
-        seo: null,
-        generatedAt: new Date().toISOString(),
-      }));
+        auditStatus: '',
+      }],
+      blocks: null,
+      sections: null,
+      links: null,
+      seo: null,
+    }));
 
     render(<App />);
+    await userEvent.click(screen.getByRole('button', { name: 'Scan' }));
     await userEvent.click(await screen.findByText('example.com'));
     await userEvent.click(screen.getByRole('button', { name: 'Pages' }));
     expect(await screen.findByText('No links found')).toBeInTheDocument();
@@ -173,7 +216,13 @@ describe('App', () => {
   });
 });
 
-function scanSummary(id: string) {
+function mockHistories(scans: unknown = [], comparisons: unknown = []) {
+  fetchMock
+    .mockResolvedValueOnce(jsonResponse(scans))
+    .mockResolvedValueOnce(jsonResponse(comparisons));
+}
+
+function scanSummary(id: string, overrides: Record<string, unknown> = {}) {
   return {
     id,
     inputUrl: 'https://example.com',
@@ -189,6 +238,148 @@ function scanSummary(id: string) {
     auditCompletedPages: 0,
     auditFailedPages: 0,
     scores: { performance: null, accessibility: null, bestPractices: null, seo: null, health: null },
+    ...overrides,
+  };
+}
+
+function scanResult(summary: ReturnType<typeof scanSummary>) {
+  return {
+    summary,
+    pages: [pageResult('https://example.com/')],
+    blocks: [],
+    sections: [],
+    links: null,
+    seo: null,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+function comparisonSummary(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    sourceInputUrl: 'https://legacy.example.com',
+    edsInputUrl: 'https://eds.example.com',
+    sourceRootUrl: 'https://legacy.example.com/',
+    edsRootUrl: 'https://eds.example.com/',
+    status: 'completed',
+    phase: 'completed',
+    startedAt: new Date().toISOString(),
+    sourcePages: 2,
+    edsPages: 2,
+    matchedPages: 1,
+    uncertainMatches: 1,
+    missingInEDS: 1,
+    extraInEDS: 1,
+    sourceFetchFailures: 1,
+    edsFetchFailures: 0,
+    metadataDiffs: 1,
+    linkDiffs: 0,
+    visualQueued: 2,
+    visualCompleted: 0,
+    visualFailed: 0,
+    visualReview: 0,
+    visualFail: 0,
+    lighthouseQueued: 2,
+    lighthouseCompleted: 0,
+    lighthouseFailed: 0,
+    migrationScore: 76,
+    ...overrides,
+  };
+}
+
+function comparisonResult(summary: ReturnType<typeof comparisonSummary>) {
+  return {
+    summary,
+    discovery: {
+      source: discoveryReport({ totalQueued: 5, totalAnalyzed: 4, fromSitemap: 2, fromStaticLinks: 2 }),
+      eds: discoveryReport({ totalQueued: 5, totalAnalyzed: 4, fromQueryIndex: 2, fromRenderedLinks: 1, warnings: ['Rendered discovery was used because static discovery only found one page.'] }),
+    },
+    matched: [{
+      path: '/',
+      status: 'review',
+      severity: 2,
+      matchType: 'exact',
+      matchConfidence: 'high',
+      sourceAliases: ['exact:/'],
+      edsAliases: ['exact:/'],
+      source: pageResult('https://legacy.example.com/', { title: 'Legacy Home', h1: 'Legacy Home' }),
+      eds: pageResult('https://eds.example.com/', { title: 'EDS Home', h1: 'EDS Home', blockCount: 2, sectionCount: 1 }),
+      fieldDiffs: [{ field: 'title', source: 'Legacy Home', eds: 'EDS Home', status: 'review' }],
+      linkDiffs: [],
+      visuals: null,
+      issues: ['Title changed'],
+    }],
+    uncertainMatches: [{
+      path: '/alias',
+      status: 'review',
+      severity: 1,
+      matchType: 'canonical',
+      matchConfidence: 'medium',
+      sourceAliases: ['exact:/alias'],
+      edsAliases: ['canonical:/alias'],
+      source: pageResult('https://legacy.example.com/alias', { title: 'Alias' }),
+      eds: pageResult('https://eds.example.com/new-alias', { title: 'Alias', canonical: 'https://eds.example.com/alias' }),
+      fieldDiffs: [],
+      linkDiffs: [],
+      visuals: [],
+      issues: ['Matched by canonical alias; verify this page pair.'],
+    }],
+    missingInEDS: [pageResult('https://legacy.example.com/missing', {
+      matchCandidates: [{ url: 'https://eds.example.com/extra', path: '/extra', title: 'Home', h1: 'Home', score: 82, reason: 'same title' }],
+    })],
+    extraInEDS: [pageResult('https://eds.example.com/extra')],
+    sourceFetchFailures: [pageResult('https://legacy.example.com/broken', { fetchError: 'HTTP 500', statusCode: 500 })],
+    edsFetchFailures: [],
+    blocks: [],
+    sections: [],
+    links: null,
+    seo: null,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+function discoveryReport(overrides: Record<string, unknown> = {}) {
+  return {
+    rootUrl: 'https://example.com/',
+    totalQueued: 0,
+    totalAnalyzed: 0,
+    fromSitemap: 0,
+    fromRobots: 0,
+    fromQueryIndex: 0,
+    fromStaticLinks: 0,
+    fromRenderedLinks: 0,
+    duplicates: 0,
+    skippedAssets: 0,
+    skippedExternal: 0,
+    limitHit: false,
+    warnings: [],
+    ...overrides,
+  };
+}
+
+function pageResult(url: string, overrides: Record<string, unknown> = {}) {
+  return {
+    url,
+    statusCode: 200,
+    title: 'Home',
+    h1: 'Home',
+    canonical: '',
+    description: '',
+    robots: '',
+    lang: '',
+    og: { title: 'Home', description: '', image: '', url: '', type: '', siteName: '' },
+    links: [],
+    blocks: [],
+    sections: [],
+    blockCount: 0,
+    sectionCount: 0,
+    linkCount: 0,
+    internalLinks: 0,
+    externalLinks: 0,
+    lighthouse: { performance: null, accessibility: null, bestPractices: null, seo: null, health: null },
+    auditStatus: 'pending',
+    matchCandidates: [],
+    ...overrides,
   };
 }
 

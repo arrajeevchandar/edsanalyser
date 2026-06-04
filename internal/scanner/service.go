@@ -18,6 +18,8 @@ import (
 type ServiceOptions struct {
 	HTTPClient *http.Client
 	Lighthouse LighthouseRunner
+	Visual     VisualRunner
+	Rendered   RenderedLinkExtractor
 	Workers    int
 }
 
@@ -38,6 +40,8 @@ type Service struct {
 	store      Store
 	client     *http.Client
 	lighthouse LighthouseRunner
+	visual     VisualRunner
+	rendered   RenderedLinkExtractor
 	workers    int
 
 	mu      sync.Mutex
@@ -54,6 +58,14 @@ func NewService(store Store, opts ServiceOptions) *Service {
 	if lighthouse == nil {
 		lighthouse = NoopLighthouseRunner{}
 	}
+	visual := opts.Visual
+	if visual == nil {
+		visual = NewChromeVisualRunner()
+	}
+	rendered := opts.Rendered
+	if rendered == nil {
+		rendered = ChromeRenderedLinkExtractor{Timeout: 15 * time.Second}
+	}
 	workers := opts.Workers
 	if workers <= 0 {
 		workers = 4
@@ -62,6 +74,8 @@ func NewService(store Store, opts ServiceOptions) *Service {
 		store:      store,
 		client:     client,
 		lighthouse: lighthouse,
+		visual:     visual,
+		rendered:   rendered,
 		workers:    workers,
 		cancels:    map[string]context.CancelFunc{},
 		events:     map[string][]chan Event{},
@@ -563,7 +577,7 @@ func pagePath(raw string) string {
 }
 
 func (s *Service) fetchAndAnalyzePage(ctx context.Context, pageURL string, root *url.URL) PageResult {
-	page := PageResult{URL: pageURL}
+	page := PageResult{RequestedURL: pageURL, URL: pageURL}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
 		page.FetchError = err.Error()
@@ -592,6 +606,7 @@ func (s *Service) fetchAndAnalyzePage(ctx context.Context, pageURL string, root 
 		return page
 	}
 	analyzed.StatusCode = resp.StatusCode
+	analyzed.RequestedURL = pageURL
 	for i := range analyzed.Links {
 		analyzed.Links[i].PageURL = canonicalURL
 	}

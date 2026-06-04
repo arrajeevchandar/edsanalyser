@@ -26,6 +26,8 @@ func NewServer(service *scanner.Service, staticDir string) http.Handler {
 	mux.HandleFunc("/api/eds-check", server.edsCheck)
 	mux.HandleFunc("/api/scans", server.scans)
 	mux.HandleFunc("/api/scans/", server.scanByID)
+	mux.HandleFunc("/api/comparisons", server.comparisons)
+	mux.HandleFunc("/api/comparisons/", server.comparisonByID)
 	mux.HandleFunc("/", server.static)
 	return withCORS(mux)
 }
@@ -158,6 +160,130 @@ func (s *Server) scanByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNotFound)
+}
+
+func (s *Server) comparisons(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		comparisons, err := s.service.ListComparisons()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, comparisons)
+	case http.MethodPost:
+		var body struct {
+			SourceURL         string `json:"sourceUrl"`
+			EDSURL            string `json:"edsUrl"`
+			CrawlLimit        *int   `json:"crawlLimit"`
+			CrawlMode         string `json:"crawlMode"`
+			RenderedDiscovery string `json:"renderedDiscovery"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		opts := scanner.DefaultComparisonOptions()
+		opts.CrawlLimit = body.CrawlLimit
+		opts.CrawlMode = body.CrawlMode
+		opts.RenderedDiscovery = body.RenderedDiscovery
+		comparison, err := s.service.StartComparison(r.Context(), body.SourceURL, body.EDSURL, opts)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, comparison)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) comparisonByID(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/api/comparisons/")
+	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, http.StatusNotFound, errors.New("comparison id is required"))
+		return
+	}
+	id := parts[0]
+
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		result, err := s.service.GetComparison(id)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, sql.ErrNoRows) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet {
+		s.events(w, r, id)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost {
+		if err := s.service.CancelComparison(id); err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelling"})
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "matches" && r.Method == http.MethodPost {
+		var body struct {
+			SourceURL string `json:"sourceUrl"`
+			EDSURL    string `json:"edsUrl"`
+			Action    string `json:"action"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		result, err := s.service.UpdateComparisonMatch(id, scanner.MatchOverride{SourceURL: body.SourceURL, EDSURL: body.EDSURL, Action: body.Action})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "visuals" && r.Method == http.MethodPost {
+		var body struct {
+			PageKeys []string `json:"pageKeys"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		summary, err := s.service.RunComparisonVisuals(r.Context(), id, body.PageKeys)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
+		return
+	}
+
+	if len(parts) == 3 && parts[1] == "visuals" && r.Method == http.MethodGet {
+		s.comparisonVisual(w, r, id, parts[2])
+		return
+	}
+
+	w.WriteHeader(http.StatusNotFound)
+}
+
+func (s *Server) comparisonVisual(w http.ResponseWriter, r *http.Request, comparisonID string, fileName string) {
+	fileName = filepath.Base(fileName)
+	path := filepath.Join(scanner.DefaultVisualDiffDir, comparisonID, fileName)
+	if _, err := os.Stat(path); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	http.ServeFile(w, r, path)
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request, scanID string) {
